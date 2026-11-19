@@ -25,5 +25,5 @@ class CharTok:
 @pytest.fixture(scope="session")
 def model():
     torch.manual_seed(0)
-    cfg = GPT2Config(vocab_size=64, n_positions=32, n_embd=32, n_layer=3, n_head=4)
+    cfg = GPT2Config(vocab_size=64, n_positions=64, n_embd=32, n_layer=3, n_head=4, attn_implementation="eager")
     return WhiteBoxModel(GPT2LMHeadModel(cfg), CharTok(), name="tiny")

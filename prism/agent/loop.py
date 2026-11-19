@@ -25,15 +25,18 @@ MODEL = "claude-opus-5-5"
 
 SYSTEM = """You are an interpretability researcher investigating how a neural language model produces a specific behaviour. \
 You have tools that run real experiments on the model under study: a deep sweep (logit lens, input attribution, direct \
-logit attribution over heads and neurons, activation patching, sparse-autoencoder features labelled via Neuronpedia), \
-targeted interventions (ablating or steering heads, neurons and SAE features), Neuronpedia lookup and search, and \
-black-box occlusion for API-only models.
+logit attribution over heads and neurons, attention patterns, activation patching of the residual stream and exact \
+patching of every head, sparse-autoencoder features labelled via Neuronpedia), targeted interventions (ablating or \
+steering heads, neurons and SAE features, with dose-response sweeps), a prompt-independent map of head roles \
+(previous-token, duplicate-token, induction), concept directions fitted from contrasting prompts, Neuronpedia lookup \
+and search, and black-box occlusion for API-only models.
 
 Work like a careful scientist. Start with a sweep to get the lay of the land, form a concrete mechanistic hypothesis, \
 then test it with interventions before believing it. Attribution scores are hypotheses, not findings: gradient-based \
 scores can have the wrong sign when attention saturates, and ablating one component is often compensated by backup \
 components. Treat a claim as established only when an intervention moves the metric the way the claim predicts, and \
-say so when it does not. Neuronpedia explanations are auto-generated labels and can be wrong; check them against what \
+say so when it does not. Direct logit attribution only sees components that write the answer themselves; heads \
+that act upstream show up in head patching and not in direct attribution, so compare the two. Neuronpedia explanations are auto-generated labels and can be wrong; check them against what \
 the feature does on this prompt. Record each conclusion with record_finding as you reach it, including negative \
 results, and state your confidence.
 
@@ -100,6 +103,45 @@ class Investigation:
         with self.ws.lock:
             return M.intervene(m, self.task, [hook], kind=kind, layer=layer, index=index, scale=scale, strength=strength, pos=pos)
 
+    def dose(self, kind, layer, index, values, pos=None) -> dict:
+        if self.task is None:
+            return dict(error="run sweep first")
+        m = self.ws.model(self.model_name)
+        pos = None if pos is None or pos < 0 else pos
+        values = [float(v) for v in values][:9]
+        if kind == "head":
+            mk = lambda v: M.head_hook(m, layer, index, v, pos)
+        elif kind == "neuron":
+            mk = lambda v: M.neuron_hook(layer, index, v, pos)
+        elif kind == "feature":
+            if layer not in self.ws.sae_layers(self.model_name):
+                return dict(error=f"no SAE for layer {layer}", available=self.ws.sae_layers(self.model_name))
+            sae = self.ws.sae(self.model_name, layer)
+            mk = lambda v: feature_hook(sae, index, scale=v, pos=pos)
+        else:
+            return dict(error="kind must be head, neuron or feature")
+        with self.ws.lock:
+            out = M.dose_response(m, self.task, mk, values)
+        out.update(kind=kind, layer=layer, index=index, meaning="value multiplies the component's activation (0 = ablated, 1 = unchanged)")
+        return out
+
+    def concept(self, positive, negative, steer_prompt=None) -> dict:
+        from ..probe import concept_direction
+        m = self.ws.model(self.model_name)
+        with self.ws.lock:
+            first = concept_direction(m, positive, negative)
+            layer = first["layer"]
+            sae = self.ws.sae(self.model_name, layer) if layer in self.ws.sae_layers(self.model_name) else None
+            out = concept_direction(m, positive, negative, steer_prompt=steer_prompt, layer=layer, sae=sae, neuronpedia=self.ws.np)
+        out.pop("_direction", None)
+        return out
+
+    def roles(self) -> dict:
+        from ..atlas import head_roles
+        with self.ws.lock:
+            r = head_roles(self.ws.model(self.model_name))
+        return dict(top=r["top"], loss_first_half=r["loss_first_half"], loss_second_half=r["loss_second_half"])
+
     def blackbox(self, prompt, target, provider="local", model=None, contrast=None) -> dict:
         if provider == "local":
             scorer = LocalScorer(self.ws.model(model or self.model_name), target, contrast)
@@ -138,7 +180,7 @@ def build_tools(inv: Investigation) -> list:
         """Return the full data for one section of the current sweep when the summary is not enough.
 
         Args:
-            name: One of predictions, logit_lens, input_attribution, dla, patching, features, verification.
+            name: One of predictions, logit_lens, input_attribution, dla, attention, patching, head_patching, features, verification.
         """
         return safe("get_section", dict(name=name), lambda: inv.section(name))
 
@@ -156,6 +198,37 @@ def build_tools(inv: Investigation) -> list:
         """
         return safe("intervene", dict(kind=kind, layer=layer, index=index, scale=scale, strength=strength, pos=pos),
                     lambda: inv.intervene(kind, layer, index, scale, strength, pos))
+
+    @beta_tool
+    def dose_response(kind: str, layer: int, index: int, values: list[float], pos: int = -1) -> str:
+        """Sweep the strength of one component and return the metric at each value. Use it to check that an effect is graded and monotonic rather than an artefact of full ablation.
+
+        Args:
+            kind: "head", "neuron" or "feature".
+            layer: Layer of the component.
+            index: Head, neuron or SAE feature index.
+            values: Multipliers on the component's activation, e.g. [0, 0.5, 1, 2, 4]. At most 9.
+            pos: Token position, or -1 for every position.
+        """
+        return safe("dose_response", dict(kind=kind, layer=layer, index=index, values=values, pos=pos),
+                    lambda: inv.dose(kind, layer, index, values, pos))
+
+    @beta_tool
+    def concept_direction(positive: list[str], negative: list[str], steer_prompt: str = "") -> str:
+        """Fit a direction that separates prompts expressing a concept from prompts that do not, score it per layer on held-out prompts, and optionally steer with it. Works on any model, with or without an SAE.
+
+        Args:
+            positive: At least 3 prompts that express the concept. Matching each with a negative that differs only in the concept gives the cleanest direction.
+            negative: At least 3 prompts that do not.
+            steer_prompt: Optional prompt on which to add and subtract the direction to test that it causally controls the output.
+        """
+        return safe("concept_direction", dict(positive=positive, negative=negative, steer_prompt=steer_prompt),
+                    lambda: inv.concept(positive, negative, steer_prompt or None))
+
+    @beta_tool
+    def head_roles() -> str:
+        """Prompt-independent map of attention-head roles for this model (previous-token, duplicate-token and induction heads), measured on repeated random tokens. Use it to interpret heads that patching flags."""
+        return safe("head_roles", {}, inv.roles)
 
     @beta_tool
     def lookup_feature(layer: int, index: int) -> str:
@@ -208,15 +281,16 @@ def build_tools(inv: Investigation) -> list:
         inv.findings.append(dict(claim=claim, evidence=evidence, confidence=confidence))
         return inv.log("record_finding", dict(claim=claim, evidence=evidence, confidence=confidence), "recorded")
 
-    return [sweep, get_section, intervene, lookup_feature, search_features, blackbox_occlusion, record_finding]
+    return [sweep, get_section, intervene, dose_response, head_roles, concept_direction, lookup_feature, search_features,
+            blackbox_occlusion, record_finding]
 
 
 def has_llm() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
 
 
-def investigate(question: str, ws: Workspace, model: str = "gpt2", on_step=None, max_iterations: int = 24,
-                llm: str = MODEL, effort: str = "high") -> dict:
+def investigate(question: str, ws: Workspace, model: str = "gpt2", on_step=None, max_iterations: int = 30,
+                llm: str = MODEL, effort: str = "high", review: bool = True) -> dict:
     """Run an LLM-driven investigation. Returns report, findings, steps, bundle."""
     import anthropic
     inv = Investigation(ws, model, on_step)
@@ -242,7 +316,36 @@ def investigate(question: str, ws: Workspace, model: str = "gpt2", on_step=None,
         report = "".join(b.text for b in final.content if b.type == "text")
         if final.stop_reason == "tool_use":
             report += f"\n\n(Stopped at the {max_iterations}-iteration limit before a final report was written.)"
-    return dict(question=question, mode="llm", llm=llm, report=report, findings=inv.findings, steps=inv.steps, bundle=inv.bundle)
+    out = dict(question=question, mode="llm", llm=llm, report=report, findings=inv.findings, steps=inv.steps, bundle=inv.bundle)
+    if review and final is not None and final.stop_reason == "end_turn":
+        out["review"] = review_report(client, out, llm)
+    return out
+
+
+REVIEWER = """You are reviewing an interpretability investigation written by another researcher. You are given their \
+report, the findings they recorded, and the log of every experiment with its result. Your job is to find claims the \
+evidence does not support: a mechanism asserted from attribution scores with no intervention behind it, an \
+intervention whose measured effect is small or has the wrong sign for the claim, a Neuronpedia label taken at face \
+value, a conclusion drawn from one prompt that would need several, or an alternative explanation the experiments \
+do not rule out. Be specific: quote the claim, cite the experiment number and the number that undercuts or supports \
+it. Then say which claims you consider established, which are plausible but unverified, and name the one experiment \
+that would most reduce the remaining uncertainty. Do not restate the report."""
+
+
+def review_report(client, result: dict, llm: str = MODEL) -> str:
+    """Independent falsification pass over a finished investigation."""
+    log = "\n".join(f"[{s['n']}] {s['tool']} {json.dumps(s['input'], ensure_ascii=False)} -> "
+                    f"{(s['output'] if isinstance(s['output'], str) else json.dumps(s['output'], ensure_ascii=False))[:1500]}"
+                    for s in result["steps"])
+    with client.beta.messages.stream(
+            model=llm, max_tokens=16000, system=REVIEWER, output_config={"effort": "high"},
+            betas=["server-side-fallback-2026-07-01"], fallbacks="default",
+            messages=[{"role": "user", "content": f"<report>\n{result['report']}\n</report>\n\n<findings>\n"
+                       f"{json.dumps(result['findings'], ensure_ascii=False, indent=1)}\n</findings>\n\n<experiment_log>\n{log}\n</experiment_log>"}]) as stream:
+        msg = stream.get_final_message()
+    if msg.stop_reason == "refusal":
+        return "The review was declined by the model's safety classifiers."
+    return "".join(b.text for b in msg.content if b.type == "text")
 
 
 def investigate_offline(prompt: str, ws: Workspace, model: str = "gpt2", target=None, contrast=None, corrupt=None,
@@ -270,5 +373,26 @@ def investigate_offline(prompt: str, ws: Workspace, model: str = "gpt2", target=
                 claim=f"Head {v['layer']}.{v['index']} writes strongly toward the answer but is not individually necessary.",
                 evidence=f"Direct logit attribution predicts {v['predicted']:+.2f} on ablation; measured {v['measured']:+.2f} — "
                          "other components compensate (backup behaviour).", confidence="high"))
+    hp = (b.get("head_patching") or {}).get("heads")
+    if hp:
+        direct = {(l, h) for _, l, h in sorted(((abs(v), l, h) for l, row in enumerate(b["dla"]["heads"]) for h, v in enumerate(row)), reverse=True)[:6]}
+        ups = [(v, l, h) for v, l, h in sorted(((v, l, h) for l, row in enumerate(hp) for h, v in enumerate(row)), key=lambda x: -abs(x[0]))[:6] if (l, h) not in direct]
+        if ups:
+            roles = {(t["layer"], t["head"]): t["role"] for t in json.loads(inv.log("head_roles", {}, inv.roles()))["top"]}
+            inv.findings.append(dict(
+                claim="Upstream heads carry part of the clean-vs-corrupted difference without writing the answer directly: " +
+                      ", ".join(f"{l}.{h}" + (f" ({roles[(l, h)].replace('_', '-')} head)" if (l, h) in roles else "") for _, l, h in ups) + ".",
+                evidence="Exact head patching restores " + ", ".join(f"{v:+.2f}" for v, _, _ in ups) +
+                         " of the metric gap respectively; none is among the top six direct writers.", confidence="high"))
+    top = next((L["features"][0] for L in (b.get("features") or {}).get("layers", [])[::-1] if L["features"]), None)
+    if top:
+        args = dict(kind="feature", layer=top["layer"], index=top["index"], values=[0, 0.5, 1, 2, 4], pos=top["pos"])
+        curve = json.loads(inv.log("dose_response", args, inv.dose(**args)))["curve"]
+        ms = [c["metric"] for c in curve]
+        mono = all(x <= y for x, y in zip(ms, ms[1:])) or all(x >= y for x, y in zip(ms, ms[1:]))
+        inv.findings.append(dict(
+            claim=f"The effect of layer {top['layer']} feature #{top['index']} is {'graded and monotonic' if mono else 'not monotonic'} in its activation.",
+            evidence="Metric at 0x, 0.5x, 1x, 2x, 4x activation: " + ", ".join(f"{x:+.2f}" for x in ms) + ".",
+            confidence="high" if mono else "medium"))
     report = "\n\n".join(f"**{f['title']}.** {f['text']}" for f in summarize(b))
     return dict(question=prompt, mode="offline", report=report, findings=inv.findings, steps=inv.steps, bundle=b)

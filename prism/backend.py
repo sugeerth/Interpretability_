@@ -44,6 +44,7 @@ class Cache:
     z: list = field(default_factory=list)
     neurons: list = field(default_factory=list)
     embeds: Optional[torch.Tensor] = None
+    attn: Optional[list] = None                     # L x [B,H,T,T] attention patterns (cache=['attn'])
 
 
 def _first(obj, names):
@@ -69,6 +70,8 @@ class WhiteBoxModel:
     """An open-weights causal LM with named hook sites."""
 
     def __init__(self, model, tokenizer, name: str = "model", device: str = "cpu"):
+        if device == "cpu":
+            model = model.float()                # checkpoints stored in half precision do not run on CPU
         self.model, self.tok, self.name, self.device = model.to(device).eval(), tokenizer, name, device
         for p in self.model.parameters():
             p.requires_grad_(False)
@@ -96,7 +99,10 @@ class WhiteBoxModel:
     def load(cls, name: str = "gpt2", device: Optional[str] = None, **kw) -> "WhiteBoxModel":
         from transformers import AutoModelForCausalLM, AutoTokenizer
         device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        model = AutoModelForCausalLM.from_pretrained(name, **kw)
+        try:                                   # eager attention exposes attention patterns
+            model = AutoModelForCausalLM.from_pretrained(name, attn_implementation="eager", **kw)
+        except (TypeError, ValueError):
+            model = AutoModelForCausalLM.from_pretrained(name, **kw)
         return cls(model, AutoTokenizer.from_pretrained(name), name=name, device=device)
 
     def info(self) -> dict:
@@ -194,7 +200,12 @@ class WhiteBoxModel:
                     if grad:                      # parameters are frozen; the graph starts at the embeddings
                         embeds = embeds.detach().requires_grad_(True)
                 out.embeds = embeds
-                out.logits = self.model(inputs_embeds=embeds).logits
+                res = self.model(inputs_embeds=embeds, output_attentions="attn" in want)
+                out.logits = res.logits
+                if "attn" in want:
+                    if not res.attentions or res.attentions[0] is None:
+                        raise RuntimeError("this model does not return attention patterns; load it with attn_implementation='eager'")
+                    out.attn = [a if grad else a.detach() for a in res.attentions]
         finally:
             for h in handles:
                 h.remove()

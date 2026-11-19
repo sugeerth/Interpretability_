@@ -15,6 +15,29 @@ Exit test (met): the indirect-object sweep on GPT-2 small recovers the published
 (name movers 9.6 / 9.9 / 10.0, negative name movers 10.7 / 11.10) and the fine-tune diff localises an
 edit to the layers that were trained.
 
+## Phase 0.5 — Second wave (done)
+
+Ideas taken from the tools surveyed in the research log and implemented here:
+
+| Borrowed from | What was built |
+|---|---|
+| TransformerLens head detectors | Model atlas: previous-token, duplicate-token and induction scores for every head |
+| Path patching (Wang et al.) | Exact per-head patching, which surfaces upstream heads that direct attribution cannot see |
+| Crosscoder model diffing (Minder et al., BatchTopK) | A crosscoder trained on base and tuned activations together, with a leakage check and a shifted-latent ranking for narrow fine-tunes |
+| Contrastive activation addition | Concept directions with held-out scoring, SAE matching and steering |
+| Sparse feature circuits | Integrated-gradient feature attribution, with exact ablation as the ranking key |
+| Neuronpedia dashboards | Feature inspector: label, promoted and suppressed tokens, top activations, live dose-response |
+| OpenMOSS QK tracing (partially) | Attention read-out for the top heads; full QK attribution is still open |
+| Circuit benchmarks | Recall against the published indirect-object circuit, for the pipeline and for agent reports |
+| Multi-agent review | A reviewer pass that tries to falsify the agent's report |
+
+Also added: a second model with Neuronpedia-aligned SAEs (Pythia-70m), corpus sweeps, a result store with
+shareable links, and background jobs.
+
+Exit test (met): on 24 indirect-object prompts the pipeline finds all five answer-writing heads from the paper by
+direct attribution, and head patching recovers three of the four S-inhibition heads and both induction heads (60% of all upstream heads). The atlas independently labels 5.5 and 6.9 as
+induction heads and 4.11 as a previous-token head, matching the literature.
+
 ## Phase 1 — Model coverage
 
 | Work | Why | Exit test |
@@ -26,9 +49,9 @@ edit to the layers that were trained.
 
 ## Phase 2 — Scale
 
-- **Job queue.** Replace the in-process lock with a queue (Redis + workers pinned one-per-GPU); the API
-  returns a job id and streams progress. Bundles go to object storage keyed by request hash.
-- **Corpus sweeps.** Run the sweep over datasets, not single prompts; store per-feature and per-head
+- **Job queue.** A single-process job runner and a content-addressed result store exist. Next: move the queue to
+  Redis with workers pinned one-per-GPU, and the store to object storage.
+- **Corpus sweeps.** Corpus sweeps exist for tens of prompts. Next: datasets of 10k+ prompts; store per-feature and per-head
   statistics in a columnar store (Parquet + DuckDB) so questions like "which features drive refusals
   across 50k prompts" are a query.
 - **Activation cache.** Persist residual activations for a reference corpus once per checkpoint so diffing
@@ -40,8 +63,8 @@ edit to the layers that were trained.
 
 - Callback for Hugging Face `Trainer` / Lightning that snapshots and diffs on a schedule and raises
   alerts on unexpected drift (a feature family appearing, collateral KL on a held-out probe set).
-- Crosscoder-based diffing (BatchTopK, with the latent-scaling checks from Minder et al.) for
-  base-vs-fine-tuned pairs; Delta-Crosscoder for narrow fine-tunes.
+- Crosscoder diffing exists at demo scale (2k latents, 30k tokens, CPU). Next: train on millions of tokens
+  on GPU, add the full latent-scaling test from Minder et al., and Delta-Crosscoder for narrow fine-tunes.
 - Checkpoint lineage view in the web app: any two points of a run, side by side.
 - Exit test: on a model organism with a planted behaviour, the diff surfaces the planted feature in the
   top 10 without being told what to look for.
@@ -61,10 +84,10 @@ edit to the layers that were trained.
 
 - Long-horizon investigations with memory across sessions, a hypothesis ledger, and automatic
   re-verification when the model under study changes.
-- Parallel sub-investigations (one per candidate mechanism) with a reviewer pass that tries to falsify
-  each claim before it reaches the report.
-- Agent-run evaluation: a fixed suite of known circuits (IOI, greater-than, induction, docstring) scored
-  on whether the agent's report names the right components; run on every release.
+- Parallel sub-investigations, one per candidate mechanism. (The reviewer pass that tries to falsify the
+  report exists.)
+- Agent-run evaluation: the indirect-object benchmark and report scorer exist. Next: add greater-than,
+  induction and docstring references and run the suite on every release.
 - Exit test: the agent recovers the documented components on at least 3 of 4 reference circuits without
   hints, and flags its own unverified claims as such.
 

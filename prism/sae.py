@@ -18,9 +18,14 @@ from .methods import Task, r
 # Open SAE releases that share feature indices with Neuronpedia.
 # hf model name -> release description. ``path`` is formatted with the layer.
 REGISTRY = {
-    "gpt2": dict(repo="jbloom/GPT2-Small-SAEs-Reformatted", path="blocks.{layer}.hook_resid_pre",
-                 neuronpedia_model="gpt2-small", neuronpedia_source="{layer}-res-jb", layers=list(range(12)),
+    # ``layers`` are Prism layers: the SAE reads resid_pre[layer]. ``offset`` converts a Prism layer to the
+    # release's own numbering (releases trained on resid_post of layer n read resid_pre[n + 1]).
+    "gpt2": dict(repo="jbloom/GPT2-Small-SAEs-Reformatted", path="blocks.{n}.hook_resid_pre",
+                 neuronpedia_model="gpt2-small", neuronpedia_source="{n}-res-jb", layers=list(range(12)),
                  center=True),   # trained on TransformerLens activations (center_writing_weights)
+    "EleutherAI/pythia-70m-deduped": dict(repo="ctigges/pythia-70m-deduped__res-sm_processed", path="{n}-res-sm",
+                                          neuronpedia_model="pythia-70m-deduped", neuronpedia_source="{n}-res-sm",
+                                          layers=[1, 2, 3, 4, 5], offset=-1),
 }
 
 
@@ -54,15 +59,13 @@ def load_sae(model_name: str, layer: int, device: str = "cpu") -> SAE:
     from huggingface_hub import hf_hub_download
     from safetensors.torch import load_file
     reg = REGISTRY[model_name]
-    sub = reg["path"].format(layer=layer)
+    if layer not in reg["layers"]:
+        raise ValueError(f"no SAE for {model_name} layer {layer}; available: {reg['layers']}")
+    n = layer + reg.get("offset", 0)
+    sub = reg["path"].format(n=n)
     w = load_file(hf_hub_download(reg["repo"], f"{sub}/sae_weights.safetensors"), device=device)
-    try:
-        cfg = json.load(open(hf_hub_download(reg["repo"], f"{sub}/cfg.json")))
-    except Exception:
-        cfg = {}
-    sae = SAE(w["W_enc"], w["b_enc"], w["W_dec"], w["b_dec"], cfg.get("hook_point_layer", layer),
-              reg.get("neuronpedia_model"), reg["neuronpedia_source"].format(layer=layer), reg.get("center", False))
-    return sae
+    return SAE(w["W_enc"], w["b_enc"], w["W_dec"], w["b_dec"], layer, reg.get("neuronpedia_model"),
+               reg["neuronpedia_source"].format(n=n), reg.get("center", False))
 
 
 def feature_hook(sae: SAE, index: int, scale: float = 0.0, add: float = 0.0, pos: Optional[int] = None) -> Hook:
@@ -95,7 +98,7 @@ def _ig_feature_grads(m, task, sae, x, acts, keep, steps: int) -> torch.Tensor:
     return g.mean(0)
 
 
-def feature_attribution(m: WhiteBoxModel, task: Task, saes: list, k: int = 12, graph_k: int = 6, ig_steps: int = 16,
+def feature_attribution(m: WhiteBoxModel, task: Task, saes: list, k: int = 12, graph_k: int = 6, ig_steps: int = 16, graph: bool = True,
                         candidates: int = 24, max_recon_err: float = 0.5) -> dict:
     """Top SAE features by attribution to the metric, plus an attribution graph.
 
@@ -171,7 +174,7 @@ def feature_attribution(m: WhiteBoxModel, task: Task, saes: list, k: int = 12, g
         nodes.append(feats[:graph_k])
 
     edges = []
-    for li, (s, feats) in enumerate(zip(saes, nodes)):
+    for li, (s, feats) in enumerate(zip(saes, nodes) if graph else ()):
         for fb in feats:
             target_act = acts_all[li][fb["pos"], fb["index"]]
             wrt = [emb] + ([resids[li - 1]] if li > 0 else [])

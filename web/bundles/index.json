@@ -15,6 +15,26 @@
   "kind": "sweep"
  },
  {
+  "id": "ioi-pythia",
+  "title": "Same task on Pythia-70m (second model)",
+  "kind": "sweep"
+ },
+ {
+  "id": "atlas",
+  "title": "Head roles",
+  "kind": "atlas"
+ },
+ {
+  "id": "corpus",
+  "title": "Corpus sweep: indirect object, 24 prompts",
+  "kind": "corpus"
+ },
+ {
+  "id": "concept",
+  "title": "Concept direction: sentiment",
+  "kind": "concept"
+ },
+ {
   "id": "training",
   "title": "Training phases: teaching GPT-2 a false fact",
   "kind": "training"

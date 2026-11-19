@@ -80,10 +80,20 @@ class Workspace:
             stage("logit_lens", lambda: M.logit_lens(m, task))
             stage("input_attribution", lambda: M.input_attribution(m, task))
             stage("dla", lambda: M.direct_logit_attribution(m, task))
+            for n in b["dla"]["neurons"][:8]:               # weight-level reading of the top neurons
+                prof = M.neuron_profile(m, n["layer"], n["index"], k=6)
+                n.update(promotes=prof["promotes"], suppresses=prof["suppresses"])
+            top_heads = sorted(((abs(v), l, h) for l, row in enumerate(b["dla"]["heads"]) for h, v in enumerate(row)), reverse=True)[:6]
+            try:
+                stage("attention", lambda: [dict(a, dla=b["dla"]["heads"][a["layer"]][a["head"]])
+                                            for a in M.attention_patterns(m, task, [(l, h) for _, l, h in top_heads])])
+            except RuntimeError as e:
+                b["attention"] = dict(error=str(e))
             if corrupt:
                 cids = m.encode(corrupt)
                 if cids.shape == task.ids.shape:
                     stage("patching", lambda: M.activation_patching(m, task, cids))
+                    stage("head_patching", lambda: M.head_patching(m, task, cids))
                 else:
                     b["patching"] = dict(error=f"corrupted prompt has {cids.shape[1]} tokens, clean has {task.ids.shape[1]}; "
                                                "they must match for position-wise patching")
@@ -157,6 +167,20 @@ def summarize(b: dict) -> list:
                          ", ".join(f"{l}.{h} ({v:+.2f})" for v, l, h in pos) + "; pushing against: " +
                          ", ".join(f"{l}.{h} ({v:+.2f})" for v, l, h in neg) +
                          f". Attention total {sum(d['attn']):+.2f}, MLP total {sum(d['mlp']):+.2f}."))
+    if isinstance(b.get("attention"), list) and b["attention"]:
+        out.append(dict(title="Where the key heads look", evidence="attention",
+                        text="From the final position: " + "; ".join(
+                            f"head {a['layer']}.{a['head']} ({a['dla']:+.2f}) attends to {a['attends_to'][0]['token']!r} "
+                            f"({a['attends_to'][0]['weight']:.2f})" for a in b["attention"][:4]) + "."))
+    if "heads" in (b.get("head_patching") or {}):
+        hp = sorted(((v, l, h) for l, row in enumerate(b["head_patching"]["heads"]) for h, v in enumerate(row)), key=lambda x: -abs(x[0]))[:6]
+        dla_top = {(l, h) for _, l, h in sorted(((abs(v), l, h) for l, row in enumerate(b["dla"]["heads"]) for h, v in enumerate(row)), reverse=True)[:6]}
+        hidden = [(v, l, h) for v, l, h in hp if (l, h) not in dla_top]
+        out.append(dict(title="Heads that carry the difference (exact patching)", evidence="head_patching",
+                        text="Restoring one head's clean output into the corrupted run: " +
+                             ", ".join(f"{l}.{h} ({v:+.2f})" for v, l, h in hp) + ". " +
+                             (f"Of these, {', '.join(f'{l}.{h}' for _, l, h in hidden)} do not appear among the top direct writers: "
+                              "they act upstream, through other heads." if hidden else "All of them are also top direct writers.")))
     if "resid" in (b.get("patching") or {}):
         g = b["patching"]["resid"]
         cells = sorted(((v, l, t) for l, row in enumerate(g) for t, v in enumerate(row)), reverse=True)

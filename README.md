@@ -18,13 +18,17 @@ fine-tuning; and **black-box attribution** for models that are only reachable th
 | Layer | What it does | Module |
 |---|---|---|
 | White-box backend | Hooks any Hugging Face causal LM by structure (GPT-2, Llama, Gemma, Qwen, Mistral, Pythia …): residual stream, per-head outputs, MLP neurons; patch / ablate / steer at any site | `prism/backend.py` |
-| Attribution | Logit lens · integrated gradients · gradient×input · direct logit attribution (layers, heads, neurons) · activation patching · attribution patching | `prism/methods.py` |
+| Attribution | Logit lens · integrated gradients · gradient×input · direct logit attribution (layers, heads, neurons) · activation patching · attribution patching · exact per-head patching · attention patterns · dose-response sweeps · weight-level neuron profiles | `prism/methods.py` |
 | Features | SAE encoding, exact per-feature ablation effects, IG feature attribution, a token→feature→feature→output attribution graph; feature ids match Neuronpedia | `prism/sae.py`, `prism/neuronpedia.py` |
+| Model atlas | Prompt-independent head roles (previous-token, duplicate-token, induction) measured on repeated random tokens | `prism/atlas.py` |
+| Concept directions | Difference-of-means directions from contrasting prompts, scored per layer on held-out pairs, matched to SAE features, tested by steering; needs no SAE | `prism/probe.py` |
+| Corpus sweeps | The analysis over many prompts with mean, spread and sign agreement per head, and recurring features | `prism/corpus.py` |
+| Benchmark | Recall against published circuits (indirect object identification) for the pipeline or for an agent's written report | `prism/evals.py` |
 | Verification | Every sweep ablates its own top components and reports predicted vs. measured effect | `prism/workspace.py` |
-| Model diffing | Weight deltas with rank structure, per-layer representation drift, output KL, SAE-feature gains and losses; a fine-tune tracer that diffs every training phase; trace diff for agent runs | `prism/diff.py`, `prism/training.py` |
+| Model diffing | Weight deltas with rank structure, per-layer representation drift, output KL, SAE-feature gains and losses; a fine-tune tracer that diffs every training phase; BatchTopK crosscoders trained on both checkpoints at once; trace diff for agent runs | `prism/diff.py`, `prism/training.py`, `prism/crosscoder.py` |
 | Semi-open models | Occlusion and counterfactual attribution for OpenAI (log-probabilities) and Anthropic (sampled answers), plus agreement scoring against an open surrogate | `prism/blackbox.py` |
-| Agent | Claude drives the tools above in a hypothesis → experiment → causal-check loop; a fixed offline protocol runs with no API key | `prism/agent/loop.py` |
-| Web app + API | Single-page app (Trace, Circuit, Training diff, Black-box, Agent) served by FastAPI; also builds as a static site | `web/`, `prism/server/app.py` |
+| Agent | Claude drives ten tools in a hypothesis → experiment → causal-check loop, then a separate reviewer pass tries to falsify the report against the experiment log; a fixed offline protocol runs with no API key | `prism/agent/loop.py` |
+| Web app + API | Single-page app (Trace, Circuit, Atlas, Concepts, Training diff, Black-box, Agent) served by FastAPI; stored results with shareable links; background jobs; also builds as a static site | `web/`, `prism/server/app.py`, `prism/store.py` |
 
 ## Quick start
 
@@ -53,7 +57,8 @@ for f in bundle["findings"]:
 ```
 
 Any Hugging Face causal LM works for every method except SAE features: `prism sweep "..." --model Qwen/Qwen2.5-0.5B`.
-SAE features need a release registered in `prism/sae.py:REGISTRY` (GPT-2 small ships registered).
+SAE features need a release registered in `prism/sae.py:REGISTRY`; GPT-2 small and Pythia-70m ship registered, both
+with feature ids that match Neuronpedia.
 
 ## Deploying it for everyone
 
@@ -62,7 +67,8 @@ SAE features need a release registered in `prism/sae.py:REGISTRY` (GPT-2 small s
 | Static demo | The full UI on precomputed GPT-2 results, no backend | Merge to `main`, then Settings → Pages → Source: *GitHub Actions* (`.github/workflows/pages.yml`) |
 | Live app | Any prompt, interventions, agent | `docker build -t prism . && docker run -p 7860:7860 prism` — the image runs unchanged on Hugging Face Spaces (Docker), Fly.io, Cloud Run or Render |
 
-Server settings (environment variables): `PRISM_MODELS` (allowed model ids, default `gpt2`), `PRISM_MAX_TOKENS`
+Server settings (environment variables): `PRISM_MODELS` (allowed model ids, default GPT-2 small and Pythia-70m), `PRISM_STORE`
+(where results are kept), `PRISM_MAX_CORPUS` (largest corpus job), `PRISM_MAX_TOKENS`
 (prompt cap, default 64), `PRISM_RATE` (requests per client per minute, default 20), `ANTHROPIC_API_KEY`
 (Claude-planned agent), `OPENAI_API_KEY` (black-box attribution on OpenAI models), `NEURONPEDIA_API_KEY` (feature search).
 
@@ -72,6 +78,11 @@ Server settings (environment variables): `PRISM_MODELS` (allowed model ids, defa
   ablating one head is often compensated by others. That is why features are ranked by *exact ablation
   effect* and why each sweep includes a predicted-vs-measured table. In the indirect-object example, heads
   9.6 and 9.9 write most strongly toward the answer yet ablating either barely changes it.
+- **Direct attribution only sees the last step.** Heads that act through other heads (S-inhibition, induction,
+  duplicate-token) are invisible to it and show up in exact head patching instead; compare the two views.
+- **One prompt is an anecdote.** The corpus sweep reports how consistently each head matters across prompts.
+- **Crosscoders report "no new latents" for small fine-tunes.** That is a finding, not a failure: a narrow edit
+  re-writes existing concepts, which the shifted-latent ranking shows.
 - **SAE features are a lossy basis.** The share of the metric carried by the SAE error term is reported per
   layer; positions where the SAE reconstructs poorly are masked.
 - **Graph edges are total effects** through the real model (gradient × activation), not direct effects in a
@@ -85,8 +96,8 @@ Server settings (environment variables): `PRISM_MODELS` (allowed model ids, defa
 ## Development
 
 ```bash
-pytest -q                          # 16 tests on tiny random GPT-2 and Llama models, no network needed
-python scripts/build_demo.py       # regenerate web/bundles/ (downloads GPT-2 + SAEs)
+pytest -q                          # 25 tests on tiny random GPT-2 and Llama models, no network needed
+python scripts/build_demo.py       # regenerate web/bundles/ (downloads models, SAEs and WikiText-2; needs pyarrow)
 python scripts/build_static.py     # dist/ static site
 ```
 

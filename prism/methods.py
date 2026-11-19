@@ -212,3 +212,80 @@ def intervene(m: WhiteBoxModel, task: Task, hooks: list, k: int = 5, **describe)
                 target_prob_before=r(float(pb[task.target])), target_prob_after=r(float(pn[task.target])),
                 kl=r(float((pb * (pb.clamp_min(1e-12).log() - pn.clamp_min(1e-12).log())).sum())),
                 top_after=[dict(token=m.tok.decode([int(i)]), prob=r(float(v))) for v, i in zip(top.values, top.indices)])
+
+
+# ------------------------------------------------------- exact head patching
+def head_patching(m: WhiteBoxModel, task: Task, corrupt_ids: torch.Tensor, batch: int = 72) -> dict:
+    """Exact path-level check for every head: copy one head's clean output into
+    the corrupted run and measure how much of the metric it restores.
+
+    grid[layer][head] in units of the clean-vs-corrupted metric gap. This is
+    the exact counterpart of the gradient estimate in ``activation_patching``.
+    """
+    if corrupt_ids.shape != task.ids.shape:
+        raise ValueError("clean and corrupted prompts must tokenize to the same length")
+    clean = m.forward(task.ids, cache=["z"])
+    m_clean = float(task.metric(clean.logits))
+    m_cor = float(task.metric(m.forward(corrupt_ids).logits))
+    denom = (m_clean - m_cor) or 1e-9
+    dh = m.d_z // m.n_heads
+    cells = [(l, h) for l in range(m.n_layers) for h in range(m.n_heads)]
+    grid = torch.zeros(m.n_layers, m.n_heads)
+    for start in range(0, len(cells), batch):
+        chunk = cells[start:start + batch]
+
+        def mk(layer):
+            rows = [(i, h) for i, (l, h) in enumerate(chunk) if l == layer]
+
+            def fn(t):
+                t = t.clone()
+                for i, h in rows:
+                    t[i, :, h * dh:(h + 1) * dh] = clean.z[layer][0, :, h * dh:(h + 1) * dh]
+                return t
+            return fn
+        hooks = [Hook("z", l, mk(l)) for l in {l for l, _ in chunk}]
+        vals = task.metric(m.forward(corrupt_ids.expand(len(chunk), -1), hooks=hooks).logits)
+        for (l, h), v in zip(chunk, vals):
+            grid[l, h] = (float(v) - m_cor) / denom
+    return dict(heads=r(grid, 3), clean_metric=r(m_clean), corrupt_metric=r(m_cor))
+
+
+# -------------------------------------------------------- attention patterns
+def attention_patterns(m: WhiteBoxModel, task: Task, heads: list) -> list:
+    """Where the given (layer, head) pairs look from the final position."""
+    c = m.forward(task.ids, cache=["attn"])
+    toks = m.str_tokens(task.ids)
+    out = []
+    for l, h in heads:
+        row = c.attn[l][0, h, -1]
+        top = row.topk(min(3, row.numel()))
+        out.append(dict(layer=l, head=h, pattern=r(row, 3), entropy=r(float(-(row * row.clamp_min(1e-9).log()).sum())),
+                        attends_to=[dict(pos=int(i), token=toks[int(i)], weight=r(float(v), 3)) for v, i in zip(top.values, top.indices)]))
+    return out
+
+
+# ---------------------------------------------------- weight-level profiles
+def neuron_profile(m: WhiteBoxModel, layer: int, index: int, k: int = 8) -> dict:
+    """What a neuron does according to the weights alone: the tokens its
+    output weight promotes and suppresses through the unembedding, and the
+    tokens whose embeddings most excite its input weight (layer-0 reading)."""
+    w_out = m.mlp_proj_matrix(layer)[index]                       # [d]
+    logit = m.W_U() @ w_out
+    hi, lo = logit.topk(k), (-logit).topk(k)
+    dec = lambda idx: [m.tok.decode([int(i)]) for i in idx]
+    return dict(layer=layer, index=index, promotes=dec(hi.indices), suppresses=dec(lo.indices),
+                promote_logits=r(hi.values, 2), suppress_logits=r(-lo.values, 2), out_norm=r(float(w_out.norm())),
+                logit_kurtosis=r(float(((logit - logit.mean()) ** 4).mean() / (logit.var() ** 2 + 1e-12)), 1))
+
+
+# ------------------------------------------------------------- dose-response
+def dose_response(m: WhiteBoxModel, task: Task, make_hook, values: list) -> dict:
+    """Metric and target probability as an intervention strength is swept.
+    ``make_hook(value) -> Hook``; all strengths run in one batch."""
+    out = []
+    for v in values:
+        logits = m.forward(task.ids, hooks=[make_hook(v)]).logits
+        p = logits[0, -1].softmax(-1)
+        out.append(dict(value=v, metric=r(float(task.metric(logits))), target_prob=r(float(p[task.target])),
+                        top=m.tok.decode([int(p.argmax())]), top_prob=r(float(p.max()))))
+    return dict(curve=out)

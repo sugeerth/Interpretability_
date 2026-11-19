@@ -3,7 +3,9 @@
     uvicorn prism.server.app:app --host 0.0.0.0 --port 8000
 
 Environment:
-    PRISM_MODELS        comma-separated HF model ids that may be loaded (default "gpt2")
+    PRISM_MODELS        comma-separated HF model ids that may be loaded (default: gpt2 and pythia-70m-deduped)
+    PRISM_STORE         directory for stored result bundles
+    PRISM_MAX_CORPUS    largest corpus-sweep job in prompts (default 64)
     PRISM_MAX_TOKENS    longest accepted prompt in tokens (default 64)
     PRISM_RATE          compute requests per client per minute (default 20)
     ANTHROPIC_API_KEY   enables the LLM-driven agent (offline protocol otherwise)
@@ -27,16 +29,18 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ..agent.loop import Investigation, has_llm, investigate, investigate_offline
+from ..store import BundleStore, Jobs
 from ..workspace import Workspace
 
 WEB = Path(__file__).resolve().parents[2] / "web"
-ALLOWED = [m.strip() for m in os.environ.get("PRISM_MODELS", "gpt2").split(",") if m.strip()]
+ALLOWED = [m.strip() for m in os.environ.get("PRISM_MODELS", "gpt2,EleutherAI/pythia-70m-deduped").split(",") if m.strip()]
 MAX_TOKENS = int(os.environ.get("PRISM_MAX_TOKENS", "64"))
 RATE = int(os.environ.get("PRISM_RATE", "20"))
 
 app = FastAPI(title="Prism — agentic interpretability", version="0.1.0")
 ws = Workspace()
 _cache: OrderedDict = OrderedDict()
+store, jobs = BundleStore(), Jobs()
 _hits: dict = defaultdict(deque)
 
 
@@ -112,10 +116,98 @@ def sweep(req: SweepReq, request: Request):
     limit(request)
     check(req.model, req.prompt, req.corrupt)
     try:
-        return cached(["sweep", req.model_dump()], lambda: ws.sweep(req.prompt, req.model, req.target or None,
-                                                                    req.contrast or None, req.corrupt or None))
+        return store.get_or_compute(dict(kind="sweep", **req.model_dump()), lambda: ws.sweep(
+            req.prompt, req.model, req.target or None, req.contrast or None, req.corrupt or None))
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@app.get("/api/bundle/{bundle_id}")
+def bundle(bundle_id: str):
+    """Fetch a stored result by id (shareable: the web app opens /?b=<id>)."""
+    try:
+        b = store.get(bundle_id)
+    except ValueError:
+        b = None
+    if b is None:
+        raise HTTPException(404, "no such bundle")
+    return b
+
+
+class DoseReq(SweepReq):
+    kind: str
+    layer: int
+    index: int
+    values: list[float] = Field(default=[0, 0.5, 1, 2, 4], max_length=9)
+    pos: Optional[int] = None
+
+
+@app.post("/api/dose")
+def dose(req: DoseReq, request: Request):
+    limit(request)
+    check(req.model, req.prompt)
+    from .. import methods as M
+    inv = Investigation(ws, req.model)
+    inv.task = M.make_task(ws.model(req.model), req.prompt, req.target or None, req.contrast or None)
+    out = inv.dose(req.kind, req.layer, req.index, req.values, req.pos)
+    if "error" in out:
+        raise HTTPException(400, out["error"])
+    return out
+
+
+@app.get("/api/atlas/{model:path}")
+def atlas_route(model: str):
+    if model not in ALLOWED:
+        raise HTTPException(404, "model not enabled")
+    from ..atlas import atlas
+
+    def go():
+        with ws.lock:
+            return atlas(ws.model(model))
+    return store.get_or_compute(dict(kind="atlas", model=model), go)
+
+
+class ConceptReq(BaseModel):
+    positive: list[str] = Field(min_length=3, max_length=24)
+    negative: list[str] = Field(min_length=3, max_length=24)
+    steer_prompt: Optional[str] = None
+    model: str = "gpt2"
+
+
+@app.post("/api/concept")
+def concept(req: ConceptReq, request: Request):
+    limit(request)
+    check(req.model, req.steer_prompt, *req.positive, *req.negative)
+    try:
+        return store.get_or_compute(dict(kind="concept", **req.model_dump()),
+                                    lambda: Investigation(ws, req.model).concept(req.positive, req.negative, req.steer_prompt))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class CorpusReq(BaseModel):
+    items: list[SweepReq] = Field(min_length=2, max_length=int(os.environ.get("PRISM_MAX_CORPUS", "64")))
+    model: str = "gpt2"
+    name: str = "corpus"
+
+
+@app.post("/api/jobs/corpus")
+def corpus_job(req: CorpusReq, request: Request):
+    """Start a corpus sweep in the background; poll /api/jobs/<id>."""
+    limit(request)
+    check(req.model, *[i.prompt for i in req.items], *[i.corrupt for i in req.items])
+    from ..corpus import corpus_sweep
+    items = [i.model_dump() for i in req.items]
+    return dict(job=jobs.submit("corpus", lambda progress: store.get_or_compute(
+        dict(kind="corpus", model=req.model, items=items), lambda: corpus_sweep(ws, items, req.model, progress=progress, name=req.name))))
+
+
+@app.get("/api/jobs/{job_id}")
+def job(job_id: str):
+    j = jobs.get(job_id)
+    if j is None:
+        raise HTTPException(404, "no such job")
+    return j
 
 
 @app.post("/api/intervene")

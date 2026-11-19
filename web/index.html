@@ -39,6 +39,10 @@ nav a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visibl
 @media(min-width:900px){ .g2{grid-template-columns:minmax(0,3fr) minmax(0,2fr)} .g11{grid-template-columns:minmax(0,1fr) minmax(0,1fr)} }
 form.run{display:grid;gap:10px;grid-template-columns:minmax(0,1fr)}
 @media(min-width:760px){form.run{grid-template-columns:minmax(0,3fr) minmax(0,1fr) minmax(0,1fr) auto;align-items:end}.run .wide{grid-column:1/4}}
+textarea{min-height:110px;resize:vertical;line-height:1.45}
+.feat[role=button]{cursor:pointer}.feat[role=button]:hover{border-color:var(--accent)}
+.kv{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12.5px}.kv b{font:600 15px var(--font-display);display:block}
+.chips{display:flex;flex-wrap:wrap;gap:4px}.chips span{font:11.5px var(--font-mono);background:var(--cell);border-radius:4px;padding:1px 6px;white-space:pre}
 label{display:flex;flex-direction:column;gap:3px;font-size:11.5px;color:var(--muted);font-weight:500;min-width:0}
 input,select,textarea{font:13px var(--font-mono);padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);min-width:0;width:100%}
 button{font:600 13px var(--font-body);padding:8px 14px;border-radius:6px;border:1px solid var(--accent);background:var(--accent);color:var(--accent-ink);cursor:pointer}
@@ -66,7 +70,7 @@ button.ghost{background:transparent;color:var(--accent)} button:disabled{opacity
 .ramp{width:120px;height:8px;border-radius:4px;background:linear-gradient(90deg,var(--neg),var(--cell),var(--pos))}
 .feat{border:1px solid var(--line);border-radius:6px;padding:8px 10px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 10px;font-size:12.5px}
 .feat .expl{grid-column:1/-1;color:var(--ink)} .feat .meta{color:var(--muted);font:11.5px var(--font-mono)}
-.feat a{color:var(--accent)} .feats{display:flex;flex-direction:column;gap:6px}
+.feat a{color:var(--accent)} .feat .pill{align-self:start} .feats{display:flex;flex-direction:column;gap:6px}
 .pill{font:500 11px var(--font-mono);padding:1px 7px;border-radius:99px;border:1px solid var(--line);white-space:nowrap}
 .pill.high{color:var(--good);border-color:var(--good)} .pill.medium{color:var(--warn);border-color:var(--warn)} .pill.low{color:var(--muted)}
 table{border-collapse:collapse;width:100%;font-size:12.5px} th{font-weight:500;color:var(--muted);text-align:left;font-size:11.5px}
@@ -89,7 +93,7 @@ svg text{font-family:var(--font-mono);fill:var(--ink)} svg .mut{fill:var(--muted
     <div class="status"><span class="dot" id="dot"></span><span id="mode">loading…</span></div>
   </header>
   <nav id="nav">
-    <a href="#trace">Trace</a><a href="#circuit">Circuit</a><a href="#training">Training diff</a><a href="#blackbox">Black-box</a><a href="#agent">Agent</a>
+    <a href="#trace">Trace</a><a href="#circuit">Circuit</a><a href="#atlas">Atlas</a><a href="#concepts">Concepts</a><a href="#training">Training diff</a><a href="#blackbox">Black-box</a><a href="#agent">Agent</a>
   </nav>
 
   <section class="panel" id="runpanel">
@@ -100,6 +104,7 @@ svg text{font-family:var(--font-mono);fill:var(--ink)} svg .mut{fill:var(--muted
       <label>Target token<input id="f-target" placeholder="top prediction"></label>
       <label>Contrast token<input id="f-contrast" placeholder="none"></label>
       <label>Example<select id="f-example"></select></label>
+      <label>Model<select id="f-model"></select></label>
     </form>
     <div class="note" id="runnote"></div>
   </section>
@@ -200,9 +205,10 @@ function heatPanel(b) {
 }
 function headsPanel(b) {
   const hasPatch = b.patching && b.patching.attribution_heads;
-  const opts = [["dla", "Direct logit attribution"]].concat(hasPatch ? [["attr", "Attribution patching"]] : []);
-  if (!hasPatch) S.opts.heads = "dla";
-  const H = S.opts.heads === "dla" ? b.dla.heads : b.patching.attribution_heads, mx = maxAbs(H), nH = H[0].length;
+  const hasExact = b.head_patching && b.head_patching.heads;
+  const opts = [["dla", "Direct logit attribution"]].concat(hasExact ? [["exact", "Exact head patching"]] : [], hasPatch ? [["attr", "Gradient estimate"]] : []);
+  if (!opts.some(o => o[0] === S.opts.heads)) S.opts.heads = "dla";
+  const H = S.opts.heads === "dla" ? b.dla.heads : S.opts.heads === "exact" ? b.head_patching.heads : b.patching.attribution_heads, mx = maxAbs(H), nH = H[0].length;
   const g = el("div", { class: "heat", style: `grid-template-columns:auto repeat(${nH},minmax(22px,1fr)) minmax(40px,auto) minmax(40px,auto)` });
   const mlpMax = maxAbs([b.dla.mlp, b.dla.attn]);
   for (let l = H.length - 1; l >= 0; l--) {
@@ -216,7 +222,8 @@ function headsPanel(b) {
   g.append(el("div", { class: "lab", style: "justify-content:center;padding:0" }, "attn"), el("div", { class: "lab", style: "justify-content:center;padding:0" }, "mlp"));
   const p = panel("Attention heads and MLP layers", S.opts.heads === "dla"
     ? `Each component's direct write onto the metric at the final position. Components sum to ${fmt(b.dla.sum_components)} (metric through the frozen final norm: ${fmt(b.dla.total)}).`
-    : "Estimated share of the clean-vs-corrupted metric gap carried by each head, summed over positions.",
+    : S.opts.heads === "exact" ? "Share of the clean-vs-corrupted metric gap restored when one head's clean output is copied into the corrupted run. Heads that light up here but not under direct attribution act upstream, through other heads."
+    : "Gradient estimate of the same quantity (2 forward passes instead of one per head).",
     el("div", { class: "scroll" }, g), legend("writes against target", "writes toward target"));
   $(".phead", p).append(seg(opts, S.opts.heads, k => { S.opts.heads = k; render(); }));
   return p;
@@ -226,18 +233,52 @@ function neuronsPanel(b) {
   return panel("Top MLP neurons", "Individual neurons ranked by direct logit attribution (activation × output weight projected on the answer direction).",
     el("div", { class: "bars" }, ns.map(n => el("div", { class: "bar" }, el("span", { class: "name" }, `L${n.layer} · ${n.index}`),
       el("div", { class: "track" }, el("span", { style: `${n.dla >= 0 ? "left:50%" : "right:50%"};width:${50 * Math.abs(n.dla) / mx}%;background:var(${n.dla >= 0 ? "--pos" : "--neg"})` })),
-      el("span", { class: "v" }, fmt(n.dla))))));
+      el("span", { class: "v" }, fmt(n.dla)),
+      n.promotes ? el("span", { class: "sub", style: "grid-column:1/-1;margin:-3px 0 2px;font-size:11.5px" }, "weights promote ", el("span", { class: "mono" }, n.promotes.slice(0, 4).map(show).join(" ")), " · suppress ", el("span", { class: "mono" }, n.suppresses.slice(0, 4).map(show).join(" "))) : null))));
+}
+function attentionPanel(b) {
+  if (!Array.isArray(b.attention) || !b.attention.length) return null;
+  const T = b.tokens.length, g = el("div", { class: "heat", style: `grid-template-columns:auto repeat(${T},minmax(22px,1fr))` });
+  b.attention.forEach(a => {
+    g.append(el("div", { class: "lab" }, `${a.layer}.${a.head} (${fmt(a.dla, 1)})`));
+    a.pattern.forEach((w, t) => g.append(el("div", { class: "cell", style: `background:color-mix(in oklab, var(--accent) ${Math.round(w * 90)}%, var(--cell));color:${w > 0.5 ? "var(--accent-ink)" : "var(--ink)"}`, title: `head ${a.layer}.${a.head} → ${show(b.tokens[t])} (pos ${t}): ${w.toFixed(3)}`, ...posAttrs(t) }, w > 0.3 ? w.toFixed(1).replace(/^0/, "") : "")));
+  });
+  g.append(el("div", {}));
+  b.tokens.forEach((t, i) => g.append(el("div", { class: "col", ...posAttrs(i) }, show(t))));
+  return panel("Where the top heads look", "Attention from the final position for the six heads with the largest direct effect (their effect in brackets). A head's effect is what it writes; this is where it reads from.", el("div", { class: "scroll" }, g));
 }
 function featCard(f, mx) {
-  return el("div", { class: "feat", ...posAttrs(f.pos) },
+  return el("div", { class: "feat", role: "button", tabindex: "0", onclick: () => inspect(f), onkeydown: e => { if (e.key === "Enter") inspect(f); }, ...posAttrs(f.pos) },
     el("span", { class: "expl" }, f.explanation || el("span", { class: "sub" }, "no Neuronpedia label")),
     el("span", { class: "meta" }, `#${f.index} at ${show(f.token)} · act ${f.act.toFixed(1)} · `, f.url ? el("a", { href: f.url, target: "_blank", rel: "noopener" }, "Neuronpedia") : ""),
     el("span", { class: "pill", style: `background:${tint(f.effect, mx)};color:${ink(f.effect, mx)};border-color:transparent`, title: `exact ablation effect ${fmt(f.effect, 3)} · integrated gradients ${fmt(f.attribution, 3)} · local gradient ${fmt(f.grad_attribution, 3)}` }, fmt(f.effect)));
 }
+async function inspect(f) {
+  S.inspect = { f, curve: null, error: null }; render();
+  if (!S.live) return;
+  try { const r = await getJSON("api/dose", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...formReq(), kind: "feature", layer: f.layer, index: f.index, pos: f.pos, values: [0, 0.5, 1, 2, 4, 8] }) }); S.inspect.curve = r.curve; }
+  catch (e) { S.inspect.error = e.message; }
+  render();
+}
+function inspectorPanel(b) {
+  const I = S.inspect; if (!I) return null; const f = I.f;
+  return panel(`Feature inspector · layer ${f.layer} #${f.index} at ${show(f.token)}`, f.explanation || "No Neuronpedia label.",
+    el("div", { class: "grid g11" },
+      el("div", { style: "display:flex;flex-direction:column;gap:8px;min-width:0" },
+        el("div", { class: "kv" }, el("span", {}, el("b", {}, fmt(f.effect)), "exact ablation effect"), el("span", {}, el("b", {}, fmt(f.attribution)), "integrated gradients"), el("span", {}, el("b", {}, fmt(f.grad_attribution)), "local gradient"), el("span", {}, el("b", {}, f.act.toFixed(1)), "activation")),
+        f.promotes && f.promotes.length ? el("div", {}, el("div", { class: "sub" }, "Promotes"), el("div", { class: "chips" }, f.promotes.map(t => el("span", {}, show(t))))) : null,
+        f.suppresses && f.suppresses.length ? el("div", {}, el("div", { class: "sub" }, "Suppresses"), el("div", { class: "chips" }, f.suppresses.map(t => el("span", {}, show(t))))) : null,
+        f.examples && f.examples.length ? el("div", {}, el("div", { class: "sub" }, "Top activating text on Neuronpedia"), f.examples.map(x => el("div", { class: "mono", style: "font-size:12px;overflow-wrap:anywhere" }, "…" + x.text.replace(/\n/g, " ")))) : null),
+      el("div", { style: "min-width:0" },
+        I.curve ? [el("div", { class: "sub" }, "Dose-response: metric as this feature's activation is scaled (1× = unchanged)."), lineChart([{ values: I.curve.map(c => c.metric), color: "var(--accent)", dots: true }], I.curve.map(c => c.value + "×"), v => v.toFixed(1)),
+          el("div", { class: "chips" }, I.curve.map(c => el("span", {}, `${c.value}× → ${show(c.top)} ${(100 * c.top_prob).toFixed(0)}%`)))]
+          : I.error ? el("div", { class: "err" }, I.error) : el("div", { class: "note" }, S.live ? "Running the dose-response sweep…" : "Dose-response sweeps run on the live server. The stored agent log for this example includes one for the top feature (Agent tab)."))),
+    el("div", {}, el("button", { class: "ghost", type: "button", onclick: () => { S.inspect = null; render(); } }, "Close")));
+}
 function featuresPanel(b) {
   if (!b.features) return panel("SAE features", "No sparse autoencoder is registered for this model, so the feature view is unavailable.");
   const mx = maxAbs(b.features.layers.map(L => L.features.map(f => f.effect)));
-  return panel("Sparse-autoencoder features", "Features read from the residual stream and labelled by Neuronpedia. The number is the exact change in the metric when that one feature is ablated at that position.",
+  return panel("Sparse-autoencoder features", "Features read from the residual stream and labelled by Neuronpedia. The number is the exact change in the metric when that one feature is ablated at that position. Select a feature to inspect it.",
     el("div", { class: "grid", style: `grid-template-columns:repeat(auto-fit,minmax(240px,1fr))` }, b.features.layers.map(L =>
       el("div", { class: "feats" }, el("div", { class: "legend" }, el("b", { class: "mono", style: "color:var(--ink)" }, `Layer ${L.layer}`), `SAE error share ${fmt(L.error_attribution)}`),
         L.features.slice(0, 6).map(f => featCard(f, mx))))),
@@ -263,7 +304,8 @@ function viewTrace(b) {
     el("div", { class: "grid g2" }, inputPanel(b), outputPanel(b)),
     heatPanel(b),
     el("div", { class: "grid g2" }, headsPanel(b), neuronsPanel(b)),
-    featuresPanel(b),
+    attentionPanel(b),
+    featuresPanel(b), inspectorPanel(b),
     el("div", { class: "grid g11" }, findingsPanel(b), verifyPanel(b)));
 }
 
@@ -311,6 +353,86 @@ function viewCircuit(b) {
     el("div", { class: "scroll" }, svg), info, legend("inhibits", "excites")), featuresPanel(b));
 }
 
+/* ----------------------------------------------------------------- atlas */
+function headGrid(H, mx, title, single) {
+  const nH = H[0].length, g = el("div", { class: "heat", style: `grid-template-columns:auto repeat(${nH},minmax(18px,1fr))` });
+  for (let l = H.length - 1; l >= 0; l--) {
+    g.append(el("div", { class: "lab" }, "L" + l));
+    H[l].forEach((v, h) => g.append(el("div", { class: "cell", tabindex: "0", style: `min-width:18px;background:${single ? `color-mix(in oklab, var(--accent) ${Math.round(Math.min(1, v / mx) * 90)}%, var(--cell))` : tint(v, mx)};color:${single ? (v / mx > 0.5 ? "var(--accent-ink)" : "var(--ink)") : ink(v, mx)}`, title: title(l, h, v) }, Math.abs(v) / mx > 0.45 ? `${h}` : "")));
+  }
+  return el("div", { class: "scroll" }, g);
+}
+function viewAtlas() {
+  const A = S.atlas, C = S.corpus, out = el("div", { class: "grid" });
+  if (!A && !C) return panel("Atlas", "Loading…");
+  if (A) {
+    S.atlasModel = Math.min(S.atlasModel || 0, A.models.length - 1);
+    const M = A.models[S.atlasModel], R = M.roles;
+    const names = { previous_token: ["Previous-token heads", "Attend to the token just before."], duplicate_token: ["Duplicate-token heads", "Attend from a repeated token back to its first occurrence."], induction: ["Induction heads", "Attend to the token that followed the earlier occurrence — the basis of in-context copying."] };
+    out.append(panel("Head roles, independent of any prompt", `Measured on ${R.n_seqs} sequences of ${R.seq_len} random tokens repeated twice, so only the repetition can explain the attention. The model's loss drops from ${R.loss_first_half.toFixed(1)} to ${R.loss_second_half.toFixed(1)} nats on the repeat: it is copying in context.`,
+      seg(A.models.map((m, i) => [i, `${m.model.name.split("/").pop()} · ${m.model.n_layers}L × ${m.model.n_heads}H`]), S.atlasModel, k => { S.atlasModel = k; render(); })));
+    out.append(el("div", { class: "grid", style: "grid-template-columns:repeat(auto-fit,minmax(280px,1fr))" }, Object.entries(names).map(([k, [t, sub]]) =>
+      panel(t, sub, headGrid(R.scores[k], 1, (l, h, v) => `head ${l}.${h}: ${v.toFixed(3)} of attention`, true),
+        el("div", { class: "chips" }, R.top.filter(x => x.role === k).map(x => el("span", {}, `${x.layer}.${x.head}  ${x.score.toFixed(2)}`)))))));
+  }
+  if (C) {
+    S.corpusMode = C.patching ? (S.corpusMode || "patching") : "dla";
+    const G = C[S.corpusMode], mx = maxAbs(G.mean), B = C.benchmark;
+    const p = panel(`Corpus sweep · ${C.name}`, `The same analysis over ${C.n} prompts instead of one. The model answers ${(100 * C.accuracy).toFixed(0)}% correctly (mean metric ${fmt(C.metric_mean)}); the answer becomes the top logit-lens prediction at layer ${C.answer_layer_mean.toFixed(1)} on average.`,
+      el("div", { class: "note" }, "Examples: " + C.examples.slice(0, 2).map(x => `“${x} …”`).join("  ")),
+      headGrid(G.mean, mx, (l, h, v) => `head ${l}.${h}: mean ${fmt(v, 3)} ± ${G.std[l][h].toFixed(3)}, same sign on ${(100 * G.sign_agreement[l][h]).toFixed(0)}% of prompts`),
+      legend("against the answer", "toward the answer"));
+    $(".phead", p).append(seg([["dla", "Mean direct attribution"]].concat(C.patching ? [["patching", "Mean exact head patching"]] : []), S.corpusMode, k => { S.corpusMode = k; render(); }));
+    const cls = B ? Object.entries(B.patching_found_by_class) : [];
+    out.append(el("div", { class: "grid g2" }, p,
+      B ? panel("Benchmark against the published circuit", `Reference: ${B.source}. Recall is the share of the paper's heads that appear in this pipeline's top ${B.k} heads.`,
+        el("div", { class: "kv" }, el("span", {}, el("b", {}, (100 * B.dla_writer_recall).toFixed(0) + "%"), "answer-writing heads found by direct attribution"), el("span", {}, el("b", {}, (100 * B.patching_upstream_recall).toFixed(0) + "%"), "upstream heads found by head patching"), el("span", {}, el("b", {}, (100 * B.patching_recall_all).toFixed(0) + "%"), "all reference heads found by head patching")),
+        el("div", { class: "scroll" }, el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, "Head class in the paper"), el("th", {}, "Recovered by head patching"))),
+          el("tbody", {}, cls.map(([c, hs]) => el("tr", {}, el("td", {}, c.replace(/_/g, " ")), el("td", { class: "mono" }, hs.length ? hs.map(h => h.join(".")).join("  ") : "none in top " + B.k)))))),
+        el("div", { class: "note" }, "Misses are informative: the heads that act earliest each carry a small share of the effect, so they fall below the top-" + B.k + " cut.")) : null));
+    out.append(panel("Features that recur across the corpus", "SAE features ranked by how often they are among a prompt's most causally important features, times their mean ablation effect.",
+      el("div", { class: "grid", style: "grid-template-columns:repeat(auto-fit,minmax(260px,1fr))" }, C.features.slice(0, 12).map(f => el("div", { class: "feat" }, el("span", { class: "expl" }, f.explanation || "no Neuronpedia label"),
+        el("span", { class: "meta" }, `L${f.layer} #${f.index} · in ${(100 * f.frequency).toFixed(0)}% of prompts · at ${f.tokens.slice(0, 2).map(show).join(" ")} · `, f.url ? el("a", { href: f.url, target: "_blank", rel: "noopener" }, "Neuronpedia") : ""),
+        el("span", { class: "pill", style: `color:var(${f.mean_effect >= 0 ? "--pos" : "--neg"})` }, fmt(f.mean_effect)))))));
+  }
+  return out;
+}
+
+/* -------------------------------------------------------------- concepts */
+function viewConcepts() {
+  const c = S.conceptResult || S.concept;
+  const form = panel("Concept directions", "Give prompts that express a concept and prompts that do not. Prism fits the difference-of-means direction at every layer, scores it on held-out prompts, names the nearest SAE features, and steers with it. No SAE is needed, so this works on any open model.",
+    el("form", { class: "run", onsubmit: runConcept },
+      el("label", { class: "wide" }, "Prompt to steer", el("input", { id: "c-steer", value: (c && c.steering && c.steering.prompt) || "" })),
+      el("button", { type: "submit", ...(S.live && !S.conceptBusy ? {} : { disabled: "" }) }, S.conceptBusy ? "Fitting…" : "Fit direction"),
+      el("label", { style: "grid-column:1/-1" }, "With the concept (one prompt per line)", el("textarea", { id: "c-pos" }, c ? c.positive.join("\n") : "")),
+      el("label", { style: "grid-column:1/-1" }, "Without it (one per line; matching pairs work best)", el("textarea", { id: "c-neg" }, c ? c.negative.join("\n") : ""))),
+    S.conceptError ? el("div", { class: "err" }, S.conceptError) : null,
+    S.live ? null : el("div", { class: "note" }, "Static demo: showing a stored result for positive vs. negative sentiment on GPT-2 small."));
+  if (!c) return el("div", { class: "grid" }, form);
+  const Ls = c.layers.slice(1), sel = c.layers[c.layer];
+  const acc = lineChart([{ values: Ls.map(x => x.loo_accuracy), color: "var(--accent)", dots: true }], Ls.map(x => "L" + x.layer), v => (100 * v).toFixed(0) + "%");
+  return el("div", { class: "grid" }, form,
+    el("div", { class: "grid g11" },
+      panel("Where the concept becomes linearly readable", `Held-out accuracy of the direction at each layer (leave-one-pair-out). Layer ${c.layer} was selected: ${(100 * sel.loo_accuracy).toFixed(0)}% accuracy, separation d′ = ${sel.dprime}.`, acc),
+      panel("What the direction says", "Reading the direction through the unembedding (logit lens).",
+        el("div", {}, el("div", { class: "sub" }, "Promotes"), el("div", { class: "chips" }, c.lens.promotes.map(t => el("span", {}, show(t))))),
+        el("div", {}, el("div", { class: "sub" }, "Suppresses"), el("div", { class: "chips" }, c.lens.suppresses.map(t => el("span", {}, show(t))))),
+        c.nearest_features ? el("div", {}, el("div", { class: "sub", style: "margin-bottom:4px" }, `Nearest SAE features at layer ${c.layer} (cosine with the direction)`), el("div", { class: "feats" }, c.nearest_features.slice(0, 4).map(f => el("div", { class: "feat" }, el("span", { class: "expl" }, f.explanation || "no Neuronpedia label"), el("span", { class: "meta" }, `#${f.index} · `, f.url ? el("a", { href: f.url, target: "_blank", rel: "noopener" }, "Neuronpedia") : ""), el("span", { class: "pill" }, f.cosine.toFixed(2)))))) : null)),
+    c.steering ? panel("Steering test", `Adding the direction to the residual stream at layer ${c.layer} while the model completes “${c.steering.prompt}”. Strength is in ${c.steering.unit}; 0 is the unmodified model.`,
+      el("div", { class: "scroll" }, el("table", {}, el("thead", {}, el("tr", {}, el("th", { class: "num" }, "Strength"), el("th", {}, "Top next tokens"))),
+        el("tbody", {}, c.steering.curve.map(x => el("tr", {}, el("td", { class: "num", style: `color:var(${x.strength > 0 ? "--pos" : x.strength < 0 ? "--neg" : "--ink"})` }, fmt(x.strength, 0)), el("td", {}, el("div", { class: "chips" }, x.top.map(t => el("span", {}, `${show(t.token)} ${(100 * t.prob).toFixed(0)}%`)))))))))) : null);
+}
+async function runConcept(ev) {
+  ev.preventDefault(); S.conceptBusy = true; S.conceptError = null;
+  const lines = id => $(id).value.split("\n").map(x => x.trim()).filter(Boolean);
+  const body = { positive: lines("#c-pos"), negative: lines("#c-neg"), steer_prompt: $("#c-steer").value || null, model: $("#f-model").value || "gpt2" };
+  render();
+  try { S.conceptResult = await getJSON("api/concept", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }); }
+  catch (e) { S.conceptError = e.message; }
+  S.conceptBusy = false; render();
+}
+
 /* -------------------------------------------------------------- training */
 function lineChart(series, labels, yfmt) {
   const W = 520, H = 170, pad = { l: 40, r: 10, t: 10, b: 24 }, NS = "http://www.w3.org/2000/svg", svg = document.createElementNS(NS, "svg");
@@ -325,6 +447,26 @@ function lineChart(series, labels, yfmt) {
     if (s.dots) s.values.forEach((v, i) => svg.append(mk("circle", { cx: X(i), cy: Y(v), r: 2.5, fill: s.color })));
   });
   return svg;
+}
+function crosscoderPanel(cc) {
+  if (!cc) return null;
+  const mx = Math.max(...cc.relative_norm_hist), W = 520, H = 120, NS = "http://www.w3.org/2000/svg", svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.style.cssText = "width:100%;height:auto;max-width:560px";
+  const mk = (tag, a, txt) => { const e = document.createElementNS(NS, tag); for (const k in a) e.setAttribute(k, a[k]); if (txt !== undefined) e.textContent = txt; return e; };
+  cc.relative_norm_hist.forEach((n, i) => { const h = n ? Math.max(2, 86 * Math.log10(1 + n) / Math.log10(1 + mx)) : 0; svg.append(mk("rect", { x: 10 + i * 25, y: 96 - h, width: 22, height: h, fill: i < 6 ? "var(--neg)" : i >= 14 ? "var(--pos)" : "var(--muted)" })); });
+  [["base only", 10, "start"], ["shared", 260, "middle"], ["tuned only", 510, "end"]].forEach(([t, x, a]) => svg.append(mk("text", { x, y: 114, "font-size": 10, "text-anchor": a, class: "mut" }, t)));
+  const item = f => el("div", { class: "feat" },
+    el("span", { class: "expl" }, f.examples.slice(0, 3).map(x => el("div", { class: "mono", style: "font-size:12px;overflow-wrap:anywhere" }, "…" + x.text.replace(/\n/g, " "), el("b", {}, x.peak.replace(/\n/g, " "))))),
+    el("span", { class: "meta" }, `latent ${f.index} · decoder cosine ${f.decoder_cosine} · change promotes `, (f.delta_promotes || f.promotes).slice(0, 4).map(show).join(" ")),
+    el("span", { class: "pill" }, f.shift !== undefined ? "shift " + f.shift : "rel " + f.relative_norm));
+  const c = cc.counts;
+  return panel("Crosscoder diff: one dictionary for both checkpoints", `A BatchTopK crosscoder (${cc.n_latents} latents) trained on ${cc.n_tokens.toLocaleString()} paired activations entering layer ${cc.layer} (${cc.corpus}). Each latent has one decoder per model; the ratio of their norms says which model owns the concept. Explained variance: ${(100 * cc.fve_base).toFixed(0)}% base, ${(100 * cc.fve_tuned).toFixed(0)}% tuned.`,
+    el("div", { class: "grid g11" },
+      el("div", { style: "min-width:0;display:flex;flex-direction:column;gap:8px" }, el("div", { class: "sub" }, "Latents by relative decoder norm (log-scaled counts)"), svg,
+        el("div", { class: "kv" }, el("span", {}, el("b", {}, c.base_only), "base-only latents"), el("span", {}, el("b", {}, c.shared), "shared"), el("span", {}, el("b", {}, c.tuned_only), "tuned-only"), el("span", {}, el("b", {}, cc.mean_shared_cosine), "mean decoder cosine of shared latents")),
+        el("div", { class: "note" }, c.tuned_only + c.base_only === 0 ? "No latent belongs to one model only: this 20-step fine-tune created no new concepts. It re-wrote existing ones slightly, which is what the list on the right ranks." : "Latents at either end exist in only one model; they are listed first.")),
+      el("div", { style: "min-width:0;display:flex;flex-direction:column;gap:6px" }, el("div", { class: "sub" }, c.tuned_only ? "Latents only the tuned model has" : "Shared latents whose decoder changed the most (weighted by how often and how strongly they fire)"),
+        (c.tuned_only ? cc.tuned_only : cc.most_shifted).slice(0, 5).map(item))));
 }
 function viewTraining(tr) {
   if (!tr) return panel("Training diff", "Loading…");
@@ -354,6 +496,7 @@ function viewTraining(tr) {
         el("div", { class: "scroll" }, el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, "Probe"), el("th", {}, "Base"), el("th", {}, "Tuned"), el("th", { class: "num" }, "KL"))),
           el("tbody", {}, ph.activations.prompts.map(p => el("tr", {}, el("td", {}, p.prompt), el("td", { class: "mono" }, `${show(p.base_top)} ${(100 * p.base_top_prob).toFixed(0)}%`),
             el("td", { class: "mono", style: p.base_top !== p.tuned_top ? "color:var(--neg)" : "" }, `${show(p.tuned_top)} ${(100 * p.tuned_top_prob).toFixed(0)}%`), el("td", { class: "num" }, p.kl.toFixed(2))))))))),
+    crosscoderPanel(tr.crosscoder),
     ph.features ? el("div", { class: "grid g11" },
       panel(`Features the tuned model gained (layer ${ph.features.layer})`, "Both checkpoints read through the base model's SAE; mean activation change on the probes.", fr(ph.features.gained, 1)),
       panel("Features it lost", "Concepts the base model represented on these prompts that the tuned model suppresses.", fr(ph.features.lost, -1))) : null);
@@ -409,7 +552,8 @@ function viewAgent(b) {
       panel("Experiment log", `${a.steps.length} steps${a.mode ? " · " + (a.mode === "llm" ? "planned by " + a.llm : "fixed protocol") : ""}`,
         el("div", {}, (S.agentBusy ? S.agentSteps : a.steps).map(s => el("div", { class: "step" }, el("span", { class: "num sub" }, s.n), el("div", {}, el("b", { class: "mono" }, s.tool), " ", el("span", { class: "sub mono" }, JSON.stringify(s.input)),
           el("pre", {}, typeof s.output === "string" ? s.output : s.tool === "sweep" ? "bundle: " + (s.output.findings || []).length + " findings, " + (s.output.features || []).length + " features" : JSON.stringify(s.output)))))))),
-    a.report ? panel("Report", null, el("div", { class: "report" }, a.report.replace(/\*\*/g, ""))) : null);
+    a.report ? panel("Report", null, el("div", { class: "report" }, a.report.replace(/\*\*/g, ""))) : null,
+    a.review ? panel("Independent review", "A second pass that tries to falsify the report's claims against the experiment log.", el("div", { class: "report" }, a.review.replace(/\*\*/g, ""))) : null);
 }
 async function runAgent(ev) {
   ev.preventDefault(); S.agentQ = $("#ag-q").value; S.agentBusy = true; S.agentSteps = []; S.agentError = null; render();
@@ -434,25 +578,30 @@ async function runAgent(ev) {
 }
 
 /* ------------------------------------------------------------------ shell */
-function formReq() { return { prompt: $("#f-prompt").value, corrupt: $("#f-corrupt").value || null, target: $("#f-target").value || null, contrast: $("#f-contrast").value || null, model: (S.health && S.health.models[0]) || "gpt2" }; }
-function fillForm(b) { const r = b.request || {}; $("#f-prompt").value = b.prompt; $("#f-corrupt").value = b.corrupt_prompt || ""; $("#f-target").value = r.target || b.predictions.target.token; $("#f-contrast").value = r.contrast || (b.predictions.contrast ? b.predictions.contrast.token : ""); }
-function route() { const h = location.hash.slice(1); return ["trace", "circuit", "training", "blackbox", "agent"].includes(h) ? h : "trace"; }
+function formReq() { return { prompt: $("#f-prompt").value, corrupt: $("#f-corrupt").value || null, target: $("#f-target").value || null, contrast: $("#f-contrast").value || null, model: $("#f-model").value || "gpt2" }; }
+function fillForm(b) { const r = b.request || {}; const ms = $("#f-model"); if (![...ms.options].some(o => o.value === b.model.name)) ms.append(el("option", { value: b.model.name }, b.model.name)); ms.value = b.model.name; $("#f-prompt").value = b.prompt; $("#f-corrupt").value = b.corrupt_prompt || ""; $("#f-target").value = r.target || b.predictions.target.token; $("#f-contrast").value = r.contrast || (b.predictions.contrast ? b.predictions.contrast.token : ""); }
+function route() { const h = location.hash.slice(1); return ["trace", "circuit", "atlas", "concepts", "training", "blackbox", "agent"].includes(h) ? h : "trace"; }
 function render() {
   const r = route(), v = $("#view");
   document.querySelectorAll("#nav a").forEach(a => a.setAttribute("aria-current", String(a.getAttribute("href") === "#" + r)));
-  $("#runpanel").hidden = r === "training";
+  $("#runpanel").hidden = ["training", "atlas", "concepts"].includes(r);
   const keep = document.activeElement && document.activeElement.id, b = S.bundle;
   let node;
   if (r === "training") node = viewTraining(S.training);
+  else if (r === "atlas") node = viewAtlas();
+  else if (r === "concepts") node = viewConcepts();
   else if (!b) node = panel("Loading", S.error || "Fetching the example…");
   else node = { trace: viewTrace, circuit: viewCircuit, blackbox: viewBlackbox, agent: viewAgent }[r](b);
   v.replaceChildren(node);
   if (keep && document.getElementById(keep)) document.getElementById(keep).focus();
 }
-async function pick(id) { S.agent = null; S.bbResult = null; S.bundle = await loadBundle(id); fillForm(S.bundle); render(); }
+async function pick(id) { S.agent = null; S.bbResult = null; S.inspect = null; S.bundle = await loadBundle(id); fillForm(S.bundle); render(); }
 async function runSweep(ev) {
   ev.preventDefault(); const btn = $("#f-run"); btn.disabled = true; btn.textContent = "Running…"; $("#runnote").textContent = "Running every method on the model. A fresh prompt takes about 10–20 seconds on CPU.";
-  try { S.bundle = await getJSON("api/sweep", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(formReq()) }); S.agent = null; S.bbResult = null; $("#runnote").textContent = `Sweep finished in ${S.bundle.timings.total}s.`; }
+  try { S.bundle = await getJSON("api/sweep", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(formReq()) }); S.agent = null; S.bbResult = null; S.inspect = null;
+    const link = `${location.origin}${location.pathname}?b=${S.bundle.id}`;
+    $("#runnote").replaceChildren(`Sweep finished in ${S.bundle.timings.total}s. Shareable link: `, el("span", { class: "mono", style: "user-select:all" }, link), " ",
+      el("button", { class: "ghost", type: "button", style: "padding:1px 8px", onclick: ev => navigator.clipboard.writeText(link).then(() => { ev.target.textContent = "Copied"; }).catch(() => {}) }, "Copy")); }
   catch (e) { $("#runnote").textContent = "Could not run: " + e.message; }
   btn.disabled = false; btn.textContent = "Run sweep"; render();
 }
@@ -468,8 +617,13 @@ async function boot() {
   $("#mode").textContent = S.live ? `live · ${S.health.models.join(", ")} on ${S.health.device}${S.health.llm_agent ? " · Claude agent on" : ""}` : "static demo · precomputed on GPT-2 small";
   $("#f-run").disabled = !S.live;
   $("#runnote").textContent = S.live ? "Type any prompt and run it, or pick an example." : "Pick an example to explore real, precomputed results. Running your own prompts needs the server (see the README: one docker command).";
-  if (sweeps.length) await pick(sweeps[0].id);
-  const t = S.index.find(x => x.kind === "training"); if (t) { S.training = await loadBundle(t.id); render(); }
+  if (S.live) S.health.models.forEach(mn => { if (![...$("#f-model").options].some(o => o.value === mn)) $("#f-model").append(el("option", { value: mn }, mn)); });
+  $("#f-model").disabled = !S.live;
+  const shared = new URLSearchParams(location.search).get("b");
+  if (S.live && shared) { try { S.bundle = await getJSON("api/bundle/" + encodeURIComponent(shared)); fillForm(S.bundle); render(); } catch (e) { $("#runnote").textContent = "That shared result is no longer stored."; } }
+  if (!S.bundle && sweeps.length) await pick(sweeps[0].id);
+  for (const [kind, key] of [["training", "training"], ["atlas", "atlas"], ["corpus", "corpus"], ["concept", "concept"]]) {
+    const t = S.index.find(x => x.kind === kind); if (t) { try { S[key] = await loadBundle(t.id); } catch (e) {} render(); } }
 }
 boot();
 </script>
