@@ -1,0 +1,22 @@
+[
+ {
+  "id": "ioi",
+  "title": "Indirect object: who gets the drink?",
+  "kind": "sweep"
+ },
+ {
+  "id": "capital",
+  "title": "Factual recall: Eiffel Tower \u2192 Paris",
+  "kind": "sweep"
+ },
+ {
+  "id": "greater",
+  "title": "Greater-than: the war lasted from 1732 to 17",
+  "kind": "sweep"
+ },
+ {
+  "id": "training",
+  "title": "Training phases: teaching GPT-2 a false fact",
+  "kind": "training"
+ }
+]

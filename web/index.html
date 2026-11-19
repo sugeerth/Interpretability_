@@ -1,0 +1,475 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="claude:viewport-fit-sides" content="cover">
+<title>Prism Interpretability</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: an instrument panel. One prompt runs left→right through input · internals · output; every panel shares one diverging scale. */
+:root{
+  --bg:#f6f7fa; --panel:#ffffff; --ink:#161a26; --muted:#5d6577; --line:#dfe3ec; --cell:#eef0f5;
+  --pos:#0b7fa8; --neg:#d2601a; --accent:#4a3fd0; --accent-ink:#ffffff; --good:#1c8a5a; --warn:#b07a00;
+  --font-display:"Space Grotesk",system-ui,sans-serif; --font-body:"Inter",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#0f121a; --panel:#171b26; --ink:#e7eaf2; --muted:#98a1b5; --line:#2a3040; --cell:#212634;
+  --pos:#3fb8e0; --neg:#f08a45; --accent:#9d95ff; --accent-ink:#0f121a; --good:#4cc38a; --warn:#e0b040; color-scheme:dark } }
+:root[data-theme="dark"]{
+  --bg:#0f121a; --panel:#171b26; --ink:#e7eaf2; --muted:#98a1b5; --line:#2a3040; --cell:#212634;
+  --pos:#3fb8e0; --neg:#f08a45; --accent:#9d95ff; --accent-ink:#0f121a; --good:#4cc38a; --warn:#e0b040; color-scheme:dark }
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{background:var(--bg);color:var(--ink);font:14px/1.5 var(--font-body);margin:0}
+.wrap{max-width:1280px;margin:0 auto;padding-block:20px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;flex-direction:column;gap:16px}
+header{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:baseline;justify-content:space-between}
+h1{font:600 22px/1.2 var(--font-display);margin:0;letter-spacing:-.01em}
+h1 small{font:400 13px var(--font-body);color:var(--muted);margin-left:10px}
+h2{font:600 14px/1.3 var(--font-display);margin:0;text-wrap:balance}
+.sub{color:var(--muted);font-size:12.5px;margin:2px 0 0;max-width:70ch}
+.status{font:500 12px var(--font-mono);color:var(--muted);display:flex;gap:8px;align-items:center}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--warn)} .dot.live{background:var(--good)}
+nav{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid var(--line)}
+nav a{padding:8px 12px;color:var(--muted);text-decoration:none;font-weight:500;border-bottom:2px solid transparent;margin-bottom:-1px}
+nav a[aria-current="true"]{color:var(--ink);border-color:var(--accent)}
+nav a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px;min-width:0;display:flex;flex-direction:column;gap:10px}
+.phead{display:flex;flex-wrap:wrap;gap:8px 12px;justify-content:space-between;align-items:flex-start}
+.grid{display:grid;gap:16px;grid-template-columns:minmax(0,1fr)}
+@media(min-width:900px){ .g2{grid-template-columns:minmax(0,3fr) minmax(0,2fr)} .g11{grid-template-columns:minmax(0,1fr) minmax(0,1fr)} }
+form.run{display:grid;gap:10px;grid-template-columns:minmax(0,1fr)}
+@media(min-width:760px){form.run{grid-template-columns:minmax(0,3fr) minmax(0,1fr) minmax(0,1fr) auto;align-items:end}.run .wide{grid-column:1/4}}
+label{display:flex;flex-direction:column;gap:3px;font-size:11.5px;color:var(--muted);font-weight:500;min-width:0}
+input,select,textarea{font:13px var(--font-mono);padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);min-width:0;width:100%}
+button{font:600 13px var(--font-body);padding:8px 14px;border-radius:6px;border:1px solid var(--accent);background:var(--accent);color:var(--accent-ink);cursor:pointer}
+button.ghost{background:transparent;color:var(--accent)} button:disabled{opacity:.45;cursor:not-allowed}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden;flex-wrap:wrap}
+.seg button{border:0;border-radius:0;background:transparent;color:var(--muted);font-weight:500;padding:4px 10px;font-size:12px}
+.seg button[aria-pressed="true"]{background:var(--cell);color:var(--ink)}
+.mono{font-family:var(--font-mono)} .num{font-variant-numeric:tabular-nums;font-family:var(--font-mono)}
+.tokens{display:flex;flex-wrap:wrap;gap:4px}
+.tok{font:13px var(--font-mono);padding:5px 7px 3px;border-radius:5px;background:var(--cell);white-space:pre;display:flex;flex-direction:column;align-items:center;gap:1px;cursor:default;border:1px solid transparent}
+.tok i{font:10px var(--font-mono);font-style:normal;color:var(--muted)}
+.tok.hl,.cell.hl,.feat.hl{border-color:var(--ink)}
+.scroll{overflow-x:auto}
+.heat{display:grid;gap:2px;font:10.5px var(--font-mono);align-items:stretch;width:max-content;min-width:100%}
+.heat .lab{color:var(--muted);padding:0 6px 0 0;display:flex;align-items:center;justify-content:flex-end;white-space:nowrap}
+.heat .col{color:var(--muted);white-space:pre;writing-mode:vertical-rl;transform:rotate(180deg);padding:4px 0;max-height:84px;overflow:hidden;text-align:left}
+.cell{min-width:22px;height:22px;border-radius:3px;background:var(--cell);border:1px solid transparent;display:flex;align-items:center;justify-content:center;overflow:hidden;white-space:pre}
+.bars{display:flex;flex-direction:column;gap:5px}
+.bar{display:grid;grid-template-columns:minmax(70px,22%) minmax(0,1fr) 56px;gap:8px;align-items:center;font-size:12.5px}
+.bar .name{font-family:var(--font-mono);white-space:pre;overflow:hidden;text-overflow:ellipsis}
+.track{height:12px;background:var(--cell);border-radius:3px;position:relative;overflow:hidden}
+.track span{position:absolute;top:0;bottom:0;border-radius:3px}
+.bar .v{text-align:right;font:12px var(--font-mono);font-variant-numeric:tabular-nums}
+.legend{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted);flex-wrap:wrap}
+.ramp{width:120px;height:8px;border-radius:4px;background:linear-gradient(90deg,var(--neg),var(--cell),var(--pos))}
+.feat{border:1px solid var(--line);border-radius:6px;padding:8px 10px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 10px;font-size:12.5px}
+.feat .expl{grid-column:1/-1;color:var(--ink)} .feat .meta{color:var(--muted);font:11.5px var(--font-mono)}
+.feat a{color:var(--accent)} .feats{display:flex;flex-direction:column;gap:6px}
+.pill{font:500 11px var(--font-mono);padding:1px 7px;border-radius:99px;border:1px solid var(--line);white-space:nowrap}
+.pill.high{color:var(--good);border-color:var(--good)} .pill.medium{color:var(--warn);border-color:var(--warn)} .pill.low{color:var(--muted)}
+table{border-collapse:collapse;width:100%;font-size:12.5px} th{font-weight:500;color:var(--muted);text-align:left;font-size:11.5px}
+th,td{padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top} td.num,th.num{text-align:right}
+.finding{display:flex;flex-direction:column;gap:2px;padding:8px 0;border-bottom:1px solid var(--line)} .finding:last-child{border:0}
+.finding b{font:600 12.5px var(--font-display)} .finding p{margin:0;font-size:13px;max-width:75ch}
+.step{display:grid;grid-template-columns:28px minmax(0,1fr);gap:8px;font-size:12.5px;padding:6px 0;border-bottom:1px solid var(--line)}
+.step>div{min-width:0;overflow-wrap:anywhere}
+.step pre{margin:2px 0 0;font:11.5px var(--font-mono);white-space:pre-wrap;word-break:break-word;color:var(--muted);max-height:120px;overflow:auto}
+.note{font-size:12.5px;color:var(--muted);border-left:3px solid var(--line);padding:2px 0 2px 10px;max-width:80ch}
+.err{color:var(--neg);font-size:13px}
+svg text{font-family:var(--font-mono);fill:var(--ink)} svg .mut{fill:var(--muted)}
+.report{font-size:13.5px;max-width:75ch;white-space:pre-wrap}
+@media (prefers-reduced-motion:no-preference){.cell,.tok{transition:border-color .1s}}
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Prism <small>input → neurons → features → output, on one scale</small></h1>
+    <div class="status"><span class="dot" id="dot"></span><span id="mode">loading…</span></div>
+  </header>
+  <nav id="nav">
+    <a href="#trace">Trace</a><a href="#circuit">Circuit</a><a href="#training">Training diff</a><a href="#blackbox">Black-box</a><a href="#agent">Agent</a>
+  </nav>
+
+  <section class="panel" id="runpanel">
+    <form class="run" id="runform">
+      <label class="wide">Prompt (the model's next token is what gets explained)<input id="f-prompt" required maxlength="2000"></label>
+      <button type="submit" id="f-run">Run sweep</button>
+      <label>Corrupted prompt for patching (same token count, optional)<input id="f-corrupt"></label>
+      <label>Target token<input id="f-target" placeholder="top prediction"></label>
+      <label>Contrast token<input id="f-contrast" placeholder="none"></label>
+      <label>Example<select id="f-example"></select></label>
+    </form>
+    <div class="note" id="runnote"></div>
+  </section>
+
+  <main id="view"></main>
+</div>
+
+<script>
+"use strict";
+const $ = (s, r = document) => r.querySelector(s);
+const el = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") e.className = v; else if (k === "style") e.style.cssText = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v); else if (v !== null && v !== undefined) e.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false) e.append(k.nodeType ? k : document.createTextNode(k));
+  return e;
+};
+const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v)) ? "–" : (v > 0 ? "+" : "") + Number(v).toFixed(d);
+const show = t => t.replace(/\n/g, "⏎").replace(/ /g, "·");
+/* One diverging scale everywhere: positive pushes toward the target, negative against. */
+const tint = (v, max) => {
+  const a = Math.min(1, Math.abs(v) / (max || 1)), pct = Math.round(Math.sqrt(a) * 88);
+  return `color-mix(in oklab, var(${v >= 0 ? "--pos" : "--neg"}) ${pct}%, var(--cell))`;
+};
+const ink = (v, max) => Math.abs(v) / (max || 1) > 0.45 ? "var(--panel)" : "var(--ink)";
+const maxAbs = a => Math.max(1e-9, ...a.flat(2).map(Math.abs));
+
+const S = { live: false, health: null, index: [], cache: {}, bundle: null, training: null, opts: { input: "integrated_gradients", heat: "logit_lens", heads: "dla" }, agentSteps: [] };
+
+async function getJSON(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m; } catch (e) {} throw new Error(m); }
+  return r.json();
+}
+async function loadBundle(id) {
+  if (!S.cache[id]) S.cache[id] = (window.PRISM_DATA && window.PRISM_DATA[id]) || await getJSON(`bundles/${id}.json`);
+  return S.cache[id];
+}
+
+/* ---------------------------------------------------------------- panels */
+function seg(options, value, onpick) {
+  return el("div", { class: "seg", role: "group" }, options.map(([k, label]) =>
+    el("button", { type: "button", "aria-pressed": String(k === value), onclick: () => onpick(k) }, label)));
+}
+function panel(title, sub, ...body) {
+  return el("section", { class: "panel" }, el("div", { class: "phead" }, el("div", {}, el("h2", {}, title), sub && el("p", { class: "sub" }, sub))), ...body);
+}
+function legend(neg, pos) { return el("div", { class: "legend" }, neg, el("span", { class: "ramp" }), pos); }
+function hlPos(p, on) { document.querySelectorAll(`[data-pos="${p}"]`).forEach(n => n.classList.toggle("hl", on)); }
+const posAttrs = p => ({ "data-pos": p, onmouseenter: () => hlPos(p, true), onmouseleave: () => hlPos(p, false) });
+
+function inputPanel(b) {
+  const ia = b.input_attribution, key = S.opts.input;
+  const opts = [["integrated_gradients", "Integrated gradients"], ["grad_x_input", "Gradient × input"]];
+  const vals = ia[key], mx = maxAbs(vals);
+  const p = panel("Input attribution", "How much each input token moves the metric. Hover a token to follow its position through every panel.",
+    el("div", { class: "tokens" }, b.tokens.map((t, i) => el("span", { class: "tok", style: `background:${tint(vals[i], mx)};color:${ink(vals[i], mx)}`, title: `position ${i}`, ...posAttrs(i) }, show(t), el("i", { style: `color:${ink(vals[i], mx)}` }, fmt(vals[i]))))),
+    legend("pushes against target", "pushes toward target"));
+  $(".phead", p).append(seg(opts, key, k => { S.opts.input = k; render(); }));
+  return p;
+}
+function outputPanel(b) {
+  const pr = b.predictions, mx = Math.max(...pr.top.map(t => t.prob));
+  const row = (t, cls) => el("div", { class: "bar" }, el("span", { class: "name" }, show(t.token)),
+    el("div", { class: "track" }, el("span", { style: `left:0;width:${100 * t.prob / mx}%;background:var(${cls})` })), el("span", { class: "v" }, (100 * t.prob).toFixed(1) + "%"));
+  return panel("Output", `Next-token distribution. Metric = logit(${show(pr.target.token)})${pr.contrast ? " − logit(" + show(pr.contrast.token) + ")" : ""} = ${fmt(pr.metric)}`,
+    el("div", { class: "bars" }, pr.top.slice(0, 8).map(t => row(t, t.id === pr.target.id ? "--pos" : (pr.contrast && t.id === pr.contrast.id ? "--neg" : "--muted")))),
+    el("div", { class: "legend" }, `target rank ${pr.target.rank} · entropy ${pr.entropy.toFixed(2)} nats`));
+}
+function heatPanel(b) {
+  const hasPatch = b.patching && b.patching.resid;
+  const opts = [["logit_lens", "Logit lens"]].concat(hasPatch ? [["patch", "Activation patching"], ["attr", "Attribution patching"]] : []);
+  if (!hasPatch && S.opts.heat !== "logit_lens") S.opts.heat = "logit_lens";
+  const mode = S.opts.heat;
+  const grid = mode === "logit_lens" ? b.logit_lens.grid : mode === "patch" ? b.patching.resid : b.patching.attribution_resid;
+  const T = b.tokens.length, mx = mode === "logit_lens" ? maxAbs(grid) : 1;
+  const g = el("div", { class: "heat", style: `grid-template-columns:auto repeat(${T},minmax(22px,1fr))` });
+  for (let l = grid.length - 1; l >= 0; l--) {
+    g.append(el("div", { class: "lab" }, mode === "logit_lens" ? (l === grid.length - 1 ? "final" : "L" + l) : "L" + l));
+    for (let t = 0; t < T; t++) {
+      const v = grid[l][t], top = mode === "logit_lens" ? b.logit_lens.top_token_grid[l][t] : null;
+      g.append(el("div", { class: "cell", style: `background:${tint(v, mx)};color:${ink(v, mx)}`, tabindex: "0",
+        title: `layer ${l}, ${show(b.tokens[t])} (pos ${t}): ${fmt(v, 3)}` + (top ? ` · decodes to ${show(top)}` : ""), ...posAttrs(t) }));
+    }
+  }
+  g.append(el("div", {}));
+  b.tokens.forEach((t, i) => g.append(el("div", { class: "col", ...posAttrs(i) }, show(t))));
+  const subs = { logit_lens: "The metric read off the residual stream entering each layer, at every position: where the answer becomes decodable.",
+    patch: `Share of the metric restored when the clean residual state is patched into the corrupted run (“${b.corrupt_prompt}”). 1 = fully restores the answer: the information lives there.`,
+    attr: `Gradient approximation of activation patching (2 forward passes instead of ${grid.length * T}). Correlation with the exact result: ${b.patching ? b.patching.approx_correlation : "–"}.` };
+  const p = panel("Residual stream · layer × position", subs[mode], el("div", { class: "scroll" }, g),
+    legend(mode === "logit_lens" ? "favours contrast" : "hurts", mode === "logit_lens" ? "favours target" : "restores answer"),
+    b.patching && b.patching.error ? el("div", { class: "note" }, "Patching skipped: " + b.patching.error) : null);
+  $(".phead", p).append(seg(opts, mode, k => { S.opts.heat = k; render(); }));
+  return p;
+}
+function headsPanel(b) {
+  const hasPatch = b.patching && b.patching.attribution_heads;
+  const opts = [["dla", "Direct logit attribution"]].concat(hasPatch ? [["attr", "Attribution patching"]] : []);
+  if (!hasPatch) S.opts.heads = "dla";
+  const H = S.opts.heads === "dla" ? b.dla.heads : b.patching.attribution_heads, mx = maxAbs(H), nH = H[0].length;
+  const g = el("div", { class: "heat", style: `grid-template-columns:auto repeat(${nH},minmax(22px,1fr)) minmax(40px,auto) minmax(40px,auto)` });
+  const mlpMax = maxAbs([b.dla.mlp, b.dla.attn]);
+  for (let l = H.length - 1; l >= 0; l--) {
+    g.append(el("div", { class: "lab" }, "L" + l));
+    H[l].forEach((v, h) => g.append(el("div", { class: "cell", tabindex: "0", style: `background:${tint(v, mx)};color:${ink(v, mx)}`, title: `head ${l}.${h}: ${fmt(v, 3)}` }, Math.abs(v) / mx > 0.35 ? `${h}` : "")));
+    g.append(el("div", { class: "cell", style: `background:${tint(b.dla.attn[l], mlpMax)};color:${ink(b.dla.attn[l], mlpMax)}`, title: `attention layer ${l} total: ${fmt(b.dla.attn[l], 3)}` }, fmt(b.dla.attn[l], 1)));
+    g.append(el("div", { class: "cell", style: `background:${tint(b.dla.mlp[l], mlpMax)};color:${ink(b.dla.mlp[l], mlpMax)}`, title: `MLP layer ${l}: ${fmt(b.dla.mlp[l], 3)}` }, fmt(b.dla.mlp[l], 1)));
+  }
+  g.append(el("div", {}));
+  for (let h = 0; h < nH; h++) g.append(el("div", { class: "lab", style: "justify-content:center;padding:0" }, "h" + h));
+  g.append(el("div", { class: "lab", style: "justify-content:center;padding:0" }, "attn"), el("div", { class: "lab", style: "justify-content:center;padding:0" }, "mlp"));
+  const p = panel("Attention heads and MLP layers", S.opts.heads === "dla"
+    ? `Each component's direct write onto the metric at the final position. Components sum to ${fmt(b.dla.sum_components)} (metric through the frozen final norm: ${fmt(b.dla.total)}).`
+    : "Estimated share of the clean-vs-corrupted metric gap carried by each head, summed over positions.",
+    el("div", { class: "scroll" }, g), legend("writes against target", "writes toward target"));
+  $(".phead", p).append(seg(opts, S.opts.heads, k => { S.opts.heads = k; render(); }));
+  return p;
+}
+function neuronsPanel(b) {
+  const ns = b.dla.neurons.slice(0, 12), mx = maxAbs(ns.map(n => n.dla));
+  return panel("Top MLP neurons", "Individual neurons ranked by direct logit attribution (activation × output weight projected on the answer direction).",
+    el("div", { class: "bars" }, ns.map(n => el("div", { class: "bar" }, el("span", { class: "name" }, `L${n.layer} · ${n.index}`),
+      el("div", { class: "track" }, el("span", { style: `${n.dla >= 0 ? "left:50%" : "right:50%"};width:${50 * Math.abs(n.dla) / mx}%;background:var(${n.dla >= 0 ? "--pos" : "--neg"})` })),
+      el("span", { class: "v" }, fmt(n.dla))))));
+}
+function featCard(f, mx) {
+  return el("div", { class: "feat", ...posAttrs(f.pos) },
+    el("span", { class: "expl" }, f.explanation || el("span", { class: "sub" }, "no Neuronpedia label")),
+    el("span", { class: "meta" }, `#${f.index} at ${show(f.token)} · act ${f.act.toFixed(1)} · `, f.url ? el("a", { href: f.url, target: "_blank", rel: "noopener" }, "Neuronpedia") : ""),
+    el("span", { class: "pill", style: `background:${tint(f.effect, mx)};color:${ink(f.effect, mx)};border-color:transparent`, title: `exact ablation effect ${fmt(f.effect, 3)} · integrated gradients ${fmt(f.attribution, 3)} · local gradient ${fmt(f.grad_attribution, 3)}` }, fmt(f.effect)));
+}
+function featuresPanel(b) {
+  if (!b.features) return panel("SAE features", "No sparse autoencoder is registered for this model, so the feature view is unavailable.");
+  const mx = maxAbs(b.features.layers.map(L => L.features.map(f => f.effect)));
+  return panel("Sparse-autoencoder features", "Features read from the residual stream and labelled by Neuronpedia. The number is the exact change in the metric when that one feature is ablated at that position.",
+    el("div", { class: "grid", style: `grid-template-columns:repeat(auto-fit,minmax(240px,1fr))` }, b.features.layers.map(L =>
+      el("div", { class: "feats" }, el("div", { class: "legend" }, el("b", { class: "mono", style: "color:var(--ink)" }, `Layer ${L.layer}`), `SAE error share ${fmt(L.error_attribution)}`),
+        L.features.slice(0, 6).map(f => featCard(f, mx))))),
+    legend("opposes target", "supports target"));
+}
+function findingsPanel(b) {
+  return panel("What the sweep found", "Generated from the measurements, no language model involved.",
+    el("div", {}, b.findings.map(f => el("div", { class: "finding" }, el("b", {}, f.title), el("p", {}, f.text)))));
+}
+function verifyPanel(b) {
+  if (!b.verification) return null;
+  return panel("Attribution vs. intervention", "Each top component is ablated for real. A gap between the predicted and measured change means the attribution missed indirect effects or backup components.",
+    el("div", { class: "scroll" }, el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, "Component"), el("th", { class: "num" }, "Predicted Δ"), el("th", { class: "num" }, "Measured Δ"), el("th", {}, "Agreement"))),
+      el("tbody", {}, b.verification.map(v => {
+        const same = v.predicted * v.measured > 0, close = same && Math.abs(v.measured) > 0.5 * Math.abs(v.predicted);
+        return el("tr", {}, el("td", { class: "mono" }, v.component, v.explanation ? el("div", { class: "sub", style: "font-family:var(--font-body)" }, v.explanation) : null),
+          el("td", { class: "num" }, fmt(v.predicted)), el("td", { class: "num" }, fmt(v.measured)),
+          el("td", {}, el("span", { class: "pill " + (close ? "high" : same ? "medium" : "low") }, close ? "confirmed" : same ? "weaker than predicted" : "sign flipped")));
+      })))));
+}
+function viewTrace(b) {
+  return el("div", { class: "grid" },
+    el("div", { class: "grid g2" }, inputPanel(b), outputPanel(b)),
+    heatPanel(b),
+    el("div", { class: "grid g2" }, headsPanel(b), neuronsPanel(b)),
+    featuresPanel(b),
+    el("div", { class: "grid g11" }, findingsPanel(b), verifyPanel(b)));
+}
+
+/* --------------------------------------------------------------- circuit */
+function viewCircuit(b) {
+  if (!b.features) return panel("Attribution graph", "Needs SAE features, which this model does not have.");
+  const G = b.features.graph, toks = G.nodes.filter(n => n.kind === "token"), feats = G.nodes.filter(n => n.kind === "feature");
+  const layers = [...new Set(feats.map(f => f.layer))].sort((a, c) => a - c);
+  const colW = Math.max(54, Math.min(86, 1100 / toks.length)), W = 70 + colW * toks.length, rowH = 120, H = 90 + rowH * (layers.length + 1);
+  const NS = "http://www.w3.org/2000/svg", svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("width", W); svg.setAttribute("height", H); svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "Attribution graph from input tokens through SAE features to the output token");
+  const mk = (tag, a, txt) => { const n = document.createElementNS(NS, tag); for (const k in a) n.setAttribute(k, a[k]); if (txt !== undefined) n.textContent = txt; return n; };
+  const pos = {}, x = p => 70 + colW * (p + 0.5), yL = l => H - 60 - rowH * (layers.indexOf(l) + 1);
+  toks.forEach(t => pos[t.id] = [x(t.pos), H - 40]);
+  const stack = {};
+  feats.forEach(f => { const k = f.layer + ":" + f.pos; stack[k] = (stack[k] || 0) + 1; pos[f.id] = [x(f.pos), yL(f.layer) + (stack[k] - 1) * 24 - 24]; });
+  pos.out = [x(toks.length - 1), 34];
+  const mx = maxAbs(G.edges.map(e => e.weight));
+  const edges = G.edges.filter(e => pos[e.src] && pos[e.dst] && Math.abs(e.weight) > 0.05 * mx);
+  const eg = mk("g", {}), ng = mk("g", {});
+  layers.forEach(l => svg.append(mk("text", { x: 4, y: yL(l) + 4, "font-size": 11, class: "mut" }, "layer " + l)));
+  svg.append(mk("text", { x: 4, y: H - 36, "font-size": 11, class: "mut" }, "input"), mk("text", { x: 4, y: 38, "font-size": 11, class: "mut" }, "output"));
+  const els = edges.map(e => {
+    const [x1, y1] = pos[e.src], [x2, y2] = pos[e.dst], my = (y1 + y2) / 2;
+    const p = mk("path", { d: `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`, fill: "none", stroke: e.weight >= 0 ? "var(--pos)" : "var(--neg)",
+      "stroke-width": (0.6 + 4.4 * Math.abs(e.weight) / mx).toFixed(2), "stroke-opacity": 0.5 });
+    p.append(mk("title", {}, `${e.src} → ${e.dst}: ${fmt(e.weight, 3)}`)); eg.append(p); return [e, p];
+  });
+  const info = el("div", { class: "note", id: "nodeinfo" }, "Hover or focus a node to isolate its edges and read its label.");
+  const focus = id => { els.forEach(([e, p]) => p.setAttribute("stroke-opacity", !id ? 0.5 : (e.src === id || e.dst === id) ? 0.95 : 0.06)); };
+  const node = (n, label, r, fill) => {
+    const [cx, cy] = pos[n.id], g = mk("g", { tabindex: 0, style: "cursor:pointer" });
+    g.append(mk("circle", { cx, cy, r, fill, stroke: "var(--ink)", "stroke-width": 1 }), mk("text", { x: cx, y: cy + (n.kind === "token" ? 22 : n.kind === "output" ? -14 : 3.5), "font-size": n.kind === "feature" ? 9 : 11, "text-anchor": "middle" }, label));
+    const on = () => { focus(n.id); info.textContent = n.kind === "feature" ? `Layer ${n.layer} feature #${n.index} at ${show(n.token)} — ${n.explanation || "no label"} · ablation effect ${fmt(n.effect)} · activation ${n.act}` : n.kind === "token" ? `Input token ${show(n.label)} (position ${n.pos})` : `Output: ${show(n.label)}`; };
+    g.addEventListener("mouseenter", on); g.addEventListener("focus", on); g.addEventListener("mouseleave", () => focus(null)); g.addEventListener("blur", () => focus(null));
+    ng.append(g);
+  };
+  const fmx = maxAbs(feats.map(f => f.effect));
+  toks.forEach(t => node(t, show(t.label).slice(0, 9), 5, "var(--cell)"));
+  feats.forEach(f => node(f, "", 9, tint(f.effect, fmx)));
+  node({ id: "out", kind: "output", label: G.nodes.find(n => n.id === "out").label }, show(G.nodes.find(n => n.id === "out").label), 10, "var(--accent)");
+  svg.append(eg, ng);
+  return el("div", { class: "grid" }, panel("Attribution graph", "Input tokens (bottom) feed SAE features (rows by layer) which drive the output (top). Edge width is the share of the destination it accounts for (gradient × activation between nodes, exact ablation into the output). Node colour is the exact ablation effect on the metric. Edges are total effects through the real model, not a replacement model.",
+    el("div", { class: "scroll" }, svg), info, legend("inhibits", "excites")), featuresPanel(b));
+}
+
+/* -------------------------------------------------------------- training */
+function lineChart(series, labels, yfmt) {
+  const W = 520, H = 170, pad = { l: 40, r: 10, t: 10, b: 24 }, NS = "http://www.w3.org/2000/svg", svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.style.cssText = "width:100%;height:auto;max-width:560px";
+  const all = series.flatMap(s => s.values), lo = Math.min(...all), hi = Math.max(...all), n = series[0].values.length, span = (hi - lo) || 1;
+  const X = i => pad.l + (W - pad.l - pad.r) * i / Math.max(1, n - 1), Y = v => pad.t + (H - pad.t - pad.b) * (1 - (v - lo) / span);
+  const mk = (tag, a, txt) => { const e = document.createElementNS(NS, tag); for (const k in a) e.setAttribute(k, a[k]); if (txt !== undefined) e.textContent = txt; return e; };
+  [lo, (lo + hi) / 2, hi].forEach(v => { svg.append(mk("line", { x1: pad.l, x2: W - pad.r, y1: Y(v), y2: Y(v), stroke: "var(--line)" }), mk("text", { x: pad.l - 6, y: Y(v) + 3, "text-anchor": "end", "font-size": 10, class: "mut" }, yfmt(v))); });
+  labels.forEach((l, i) => { if (n <= 14 || i % Math.ceil(n / 10) === 0) svg.append(mk("text", { x: X(i), y: H - 6, "text-anchor": "middle", "font-size": 10, class: "mut" }, l)); });
+  series.forEach(s => {
+    svg.append(mk("polyline", { points: s.values.map((v, i) => `${X(i)},${Y(v)}`).join(" "), fill: "none", stroke: s.color, "stroke-width": s.width || 1.6, "stroke-opacity": s.opacity || 1 }));
+    if (s.dots) s.values.forEach((v, i) => svg.append(mk("circle", { cx: X(i), cy: Y(v), r: 2.5, fill: s.color })));
+  });
+  return svg;
+}
+function viewTraining(tr) {
+  if (!tr) return panel("Training diff", "Loading…");
+  S.phase = Math.min(S.phase ?? tr.phases.length - 1, tr.phases.length - 1);
+  const ph = tr.phases[S.phase], L = ph.weights.per_layer.mlp.length, wmx = maxAbs([ph.weights.per_layer.mlp, ph.weights.per_layer.attn].concat(tr.phases.map(p => p.weights.per_layer.mlp)));
+  const picker = seg(tr.phases.map((p, i) => [i, `step ${p.step}`]), S.phase, k => { S.phase = k; render(); });
+  const wg = el("div", { class: "heat", style: `grid-template-columns:auto repeat(${L},minmax(26px,1fr))` });
+  for (const c of ["attn", "mlp"]) { wg.append(el("div", { class: "lab" }, c)); ph.weights.per_layer[c].forEach((v, l) => wg.append(el("div", { class: "cell", style: `background:${tint(v, wmx)};color:${ink(v, wmx)}`, title: `${c} layer ${l}: relative update ${(100 * v).toFixed(3)}%` }))); }
+  wg.append(el("div", {})); for (let l = 0; l < L; l++) wg.append(el("div", { class: "lab", style: "justify-content:center;padding:0" }, "L" + l));
+  const colors = ["var(--muted)", "var(--neg)", "var(--warn)", "var(--pos)", "var(--accent)"];
+  const drift = lineChart(tr.phases.map((p, i) => ({ values: p.activations.rel_shift, color: i === S.phase ? "var(--accent)" : "var(--muted)", width: i === S.phase ? 2.4 : 1, opacity: i === S.phase ? 1 : 0.5, dots: i === S.phase })),
+    ph.activations.rel_shift.map((_, l) => l === L ? "out" : "L" + l), v => (100 * v).toFixed(1) + "%");
+  const loss = lineChart([{ values: tr.loss, color: "var(--accent)", dots: true }], tr.loss.map((_, i) => String(i + 1)), v => v.toFixed(1));
+  const fr = (rows, sign) => el("div", { class: "feats" }, rows.slice(0, 6).map(f => el("div", { class: "feat" }, el("span", { class: "expl" }, f.explanation || "no Neuronpedia label"),
+    el("span", { class: "meta" }, `L${f.layer} #${f.index}`, f.peak_token ? ` · peak at ${show(f.peak_token)}` : "", " · ", f.url ? el("a", { href: f.url, target: "_blank", rel: "noopener" }, "Neuronpedia") : ""),
+    el("span", { class: "pill", style: `color:var(${sign > 0 ? "--pos" : "--neg"})` }, fmt(f.mean_delta, 3)))));
+  const top = ph.weights.top[0];
+  return el("div", { class: "grid" },
+    panel("Model diff across training phases", tr.description, picker,
+      el("div", { class: "note" }, `Training text: “${tr.texts[0]}” and ${tr.texts.length - 1} paraphrases. ${ph.weights.n_changed} of ${ph.weights.n_total} weight tensors changed by step ${ph.step}; mean KL on probes ${ph.activations.mean_kl.toFixed(2)} nats.`)),
+    el("div", { class: "grid g11" },
+      panel("Where the weights moved", `Relative update size ‖ΔW‖/‖W‖ per layer at step ${ph.step}. Largest single tensor: ${top.name} (${(100 * top.rel_norm).toFixed(2)}%${top.stable_rank ? ", stable rank " + top.stable_rank : ""}).`, el("div", { class: "scroll" }, wg)),
+      panel("Training loss", "Loss per optimisation step.", loss)),
+    el("div", { class: "grid g11" },
+      panel("Where the representations moved", "Mean relative shift of the residual stream entering each layer (selected phase highlighted, other phases in grey). Shift that starts at the first trained layer and persists downstream shows the edit propagating.", drift),
+      panel("Behaviour on probe prompts", "Top prediction before and after. Unrelated probes that also change are collateral damage of the edit.",
+        el("div", { class: "scroll" }, el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, "Probe"), el("th", {}, "Base"), el("th", {}, "Tuned"), el("th", { class: "num" }, "KL"))),
+          el("tbody", {}, ph.activations.prompts.map(p => el("tr", {}, el("td", {}, p.prompt), el("td", { class: "mono" }, `${show(p.base_top)} ${(100 * p.base_top_prob).toFixed(0)}%`),
+            el("td", { class: "mono", style: p.base_top !== p.tuned_top ? "color:var(--neg)" : "" }, `${show(p.tuned_top)} ${(100 * p.tuned_top_prob).toFixed(0)}%`), el("td", { class: "num" }, p.kl.toFixed(2))))))))),
+    ph.features ? el("div", { class: "grid g11" },
+      panel(`Features the tuned model gained (layer ${ph.features.layer})`, "Both checkpoints read through the base model's SAE; mean activation change on the probes.", fr(ph.features.gained, 1)),
+      panel("Features it lost", "Concepts the base model represented on these prompts that the tuned model suppresses.", fr(ph.features.lost, -1))) : null);
+}
+
+/* -------------------------------------------------------------- blackbox */
+function occPanel(o, title, sub) {
+  const mx = maxAbs(o.attribution);
+  return panel(title, sub, el("div", { class: "tokens" }, o.units.map((u, i) => el("span", { class: "tok", style: `background:${tint(o.attribution[i], mx)};color:${ink(o.attribution[i], mx)}` }, show(u.trim()), el("i", { style: `color:${ink(o.attribution[i], mx)}` }, fmt(o.attribution[i]))))),
+    el("div", { class: "legend" }, `${o.n_queries} model queries · access: ${o.access || o.provider} · full score ${fmt(o.full_score)}`));
+}
+function viewBlackbox(b) {
+  const out = el("div", { class: "grid" });
+  out.append(panel("Models you cannot open", "Hosted models (Anthropic, OpenAI) expose no activations, so attribution is done by perturbation: remove one word at a time and measure how the answer changes. OpenAI models expose token log-probabilities; Anthropic models do not, so the score there is the answer frequency over repeated samples. The same method run on the open model below shows how far it agrees with gradients.",
+    el("form", { class: "run", id: "bbform", onsubmit: runBlackbox },
+      el("label", { class: "wide" }, "Prompt", el("input", { id: "bb-prompt", value: (S.bb && S.bb.prompt) || b.prompt, required: "" })),
+      el("button", { type: "submit", ...(S.live ? {} : { disabled: "" }) }, "Run occlusion"),
+      el("label", {}, "Target answer", el("input", { id: "bb-target", value: (S.bb && S.bb.target) || b.predictions.target.token.trim(), required: "" })),
+      el("label", {}, "Provider", el("select", { id: "bb-provider" }, [["local", "Open model as black box"], ["openai", "OpenAI (logprobs)"], ["anthropic", "Anthropic (sampling)"]].map(([v, t]) => el("option", { value: v, ...(S.bb && S.bb.provider === v ? { selected: "" } : {}) }, t)))),
+      el("label", {}, "Model id (optional)", el("input", { id: "bb-model", placeholder: "provider default" }))),
+    S.bbError ? el("div", { class: "err" }, S.bbError) : null,
+    S.live ? null : el("div", { class: "note" }, "This is the static demo: results below were precomputed. Run the server to query hosted models with your own API keys.")));
+  if (S.bbResult) out.append(occPanel(S.bbResult, `Occlusion on ${S.bbResult.provider}`, `Score change when each word is removed; target “${S.bbResult.target}”.`));
+  if (b.blackbox) {
+    out.append(el("div", { class: "grid g11" }, occPanel(b.blackbox, "Black-box occlusion (no weights used)", "Drop in the metric when each word is removed."), inputPanel(b)));
+    out.append(el("div", { class: "note" }, "Reading the pair: where occlusion and integrated gradients agree, the black-box map can be trusted as a stand-in for the white-box one. Where they disagree, the model is using the token non-linearly (for example a name that matters only in combination with its repeat)."));
+  }
+  return out;
+}
+async function runBlackbox(ev) {
+  ev.preventDefault(); S.bbError = null;
+  S.bb = { prompt: $("#bb-prompt").value, target: $("#bb-target").value, provider: $("#bb-provider").value, model: $("#bb-model").value || null };
+  try { S.bbResult = await getJSON("api/blackbox", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(S.bb) }); }
+  catch (e) { S.bbError = e.message; }
+  render();
+}
+
+/* ----------------------------------------------------------------- agent */
+function viewAgent(b) {
+  const a = S.agent || b.agent || { findings: [], steps: [], report: "" };
+  const llm = S.health && S.health.llm_agent;
+  return el("div", { class: "grid" },
+    panel("Investigation agent", llm ? "Claude plans the experiments: it runs the sweep, forms a hypothesis, and tests it with ablation and steering before reporting."
+      : "Without an Anthropic API key the agent runs a fixed protocol: sweep, then ablate and amplify the top feature in each layer. With a key, Claude chooses the experiments.",
+      el("form", { class: "run", onsubmit: runAgent },
+        el("label", { class: "wide" }, "Question for the agent (uses the prompt above)", el("input", { id: "ag-q", value: S.agentQ || "How does the model arrive at this answer? Identify the mechanism and verify it causally." })),
+        el("button", { type: "submit", ...(S.live && !S.agentBusy ? {} : { disabled: "" }) }, S.agentBusy ? "Investigating…" : "Investigate")),
+      S.agentError ? el("div", { class: "err" }, S.agentError) : null,
+      S.live ? null : el("div", { class: "note" }, "Static demo: showing the stored investigation for this example.")),
+    el("div", { class: "grid g11" },
+      panel("Findings notebook", "Claims the agent recorded, with the evidence and its confidence. High means an intervention confirmed it.",
+        a.findings.length ? el("div", {}, a.findings.map(f => el("div", { class: "finding" }, el("div", { style: "display:flex;gap:8px;align-items:baseline;flex-wrap:wrap" }, el("span", { class: "pill " + f.confidence }, f.confidence), el("b", {}, f.claim)), el("p", { class: "sub" }, f.evidence)))) : el("div", { class: "sub" }, "No findings yet.")),
+      panel("Experiment log", `${a.steps.length} steps${a.mode ? " · " + (a.mode === "llm" ? "planned by " + a.llm : "fixed protocol") : ""}`,
+        el("div", {}, (S.agentBusy ? S.agentSteps : a.steps).map(s => el("div", { class: "step" }, el("span", { class: "num sub" }, s.n), el("div", {}, el("b", { class: "mono" }, s.tool), " ", el("span", { class: "sub mono" }, JSON.stringify(s.input)),
+          el("pre", {}, typeof s.output === "string" ? s.output : s.tool === "sweep" ? "bundle: " + (s.output.findings || []).length + " findings, " + (s.output.features || []).length + " features" : JSON.stringify(s.output)))))))),
+    a.report ? panel("Report", null, el("div", { class: "report" }, a.report.replace(/\*\*/g, ""))) : null);
+}
+async function runAgent(ev) {
+  ev.preventDefault(); S.agentQ = $("#ag-q").value; S.agentBusy = true; S.agentSteps = []; S.agentError = null; render();
+  try {
+    const resp = await fetch("api/agent", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...formReq(), question: S.agentQ }) });
+    if (!resp.ok) throw new Error((await resp.json()).detail || resp.statusText);
+    const reader = resp.body.getReader(), dec = new TextDecoder(); let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i; while ((i = buf.indexOf("\n\n")) >= 0) {
+        const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+        const ev2 = (chunk.match(/^event: (.*)$/m) || [])[1], data = (chunk.match(/^data: (.*)$/m) || [])[1];
+        if (!ev2 || !data) continue; const d = JSON.parse(data);
+        if (ev2 === "step") { S.agentSteps.push(d); render(); }
+        else if (ev2 === "done") { S.agent = d; if (d.bundle) { S.bundle = { ...d.bundle, agent: d }; } }
+        else if (ev2 === "error") throw new Error(d.error);
+      }
+    }
+  } catch (e) { S.agentError = e.message; }
+  S.agentBusy = false; render();
+}
+
+/* ------------------------------------------------------------------ shell */
+function formReq() { return { prompt: $("#f-prompt").value, corrupt: $("#f-corrupt").value || null, target: $("#f-target").value || null, contrast: $("#f-contrast").value || null, model: (S.health && S.health.models[0]) || "gpt2" }; }
+function fillForm(b) { const r = b.request || {}; $("#f-prompt").value = b.prompt; $("#f-corrupt").value = b.corrupt_prompt || ""; $("#f-target").value = r.target || b.predictions.target.token; $("#f-contrast").value = r.contrast || (b.predictions.contrast ? b.predictions.contrast.token : ""); }
+function route() { const h = location.hash.slice(1); return ["trace", "circuit", "training", "blackbox", "agent"].includes(h) ? h : "trace"; }
+function render() {
+  const r = route(), v = $("#view");
+  document.querySelectorAll("#nav a").forEach(a => a.setAttribute("aria-current", String(a.getAttribute("href") === "#" + r)));
+  $("#runpanel").hidden = r === "training";
+  const keep = document.activeElement && document.activeElement.id, b = S.bundle;
+  let node;
+  if (r === "training") node = viewTraining(S.training);
+  else if (!b) node = panel("Loading", S.error || "Fetching the example…");
+  else node = { trace: viewTrace, circuit: viewCircuit, blackbox: viewBlackbox, agent: viewAgent }[r](b);
+  v.replaceChildren(node);
+  if (keep && document.getElementById(keep)) document.getElementById(keep).focus();
+}
+async function pick(id) { S.agent = null; S.bbResult = null; S.bundle = await loadBundle(id); fillForm(S.bundle); render(); }
+async function runSweep(ev) {
+  ev.preventDefault(); const btn = $("#f-run"); btn.disabled = true; btn.textContent = "Running…"; $("#runnote").textContent = "Running every method on the model. A fresh prompt takes about 10–20 seconds on CPU.";
+  try { S.bundle = await getJSON("api/sweep", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(formReq()) }); S.agent = null; S.bbResult = null; $("#runnote").textContent = `Sweep finished in ${S.bundle.timings.total}s.`; }
+  catch (e) { $("#runnote").textContent = "Could not run: " + e.message; }
+  btn.disabled = false; btn.textContent = "Run sweep"; render();
+}
+async function boot() {
+  window.addEventListener("hashchange", render);
+  $("#runform").addEventListener("submit", runSweep);
+  try { S.index = (window.PRISM_DATA && window.PRISM_DATA.index) || await getJSON("bundles/index.json"); } catch (e) { S.error = "Could not load the example index: " + e.message; }
+  const sweeps = S.index.filter(x => x.kind === "sweep"), sel = $("#f-example");
+  sweeps.forEach(x => sel.append(el("option", { value: x.id }, x.title)));
+  sel.addEventListener("change", () => pick(sel.value));
+  try { S.health = await getJSON("api/health"); S.live = true; } catch (e) { S.live = false; }
+  $("#dot").classList.toggle("live", S.live);
+  $("#mode").textContent = S.live ? `live · ${S.health.models.join(", ")} on ${S.health.device}${S.health.llm_agent ? " · Claude agent on" : ""}` : "static demo · precomputed on GPT-2 small";
+  $("#f-run").disabled = !S.live;
+  $("#runnote").textContent = S.live ? "Type any prompt and run it, or pick an example." : "Pick an example to explore real, precomputed results. Running your own prompts needs the server (see the README: one docker command).";
+  if (sweeps.length) await pick(sweeps[0].id);
+  const t = S.index.find(x => x.kind === "training"); if (t) { S.training = await loadBundle(t.id); render(); }
+}
+boot();
+</script>
