@@ -12,4 +12,6 @@ html = (dist / "index.html").read_text()
 body = re.sub(r"<!doctype html>\s*<meta charset[^>]*>\s*<meta name=\"viewport\"[^>]*>\s*", "", html, count=1)
 assert body != html, "skeleton header not found"
 (dist / "artifact.html").write_text(body)
+for f in (dist / "bundles").glob("*.json"):       # tokens that are partial UTF-8 sequences decode to U+FFFD
+    f.write_text(f.read_text().replace("\ufffd", "\u25a1"))
 print("built", dist, sum(f.stat().st_size for f in dist.rglob("*") if f.is_file()) // 1024, "KB")
