@@ -1,0 +1,104 @@
+# Roadmap: inception to production
+
+Each phase has an exit test. A phase is done when the test passes, not when the code exists.
+
+## Phase 0 — Foundations (done)
+
+One prompt, one metric, every method, one JSON bundle.
+
+- Architecture-agnostic hook backend; six attribution methods; SAE features tied to Neuronpedia ids.
+- Self-verifying sweep (predicted vs. measured ablation effects).
+- Model diffing and a fine-tune tracer; black-box occlusion for API-only models.
+- Agent with a Claude-planned loop and an offline protocol; web app; static demo; Docker image; CI.
+
+Exit test (met): the indirect-object sweep on GPT-2 small recovers the published circuit components
+(name movers 9.6 / 9.9 / 10.0, negative name movers 10.7 / 11.10) and the fine-tune diff localises an
+edit to the layers that were trained.
+
+## Phase 0.5 — Second wave (done)
+
+Ideas taken from the tools surveyed in the research log and implemented here:
+
+| Borrowed from | What was built |
+|---|---|
+| TransformerLens head detectors | Model atlas: previous-token, duplicate-token and induction scores for every head |
+| Path patching (Wang et al.) | Exact per-head patching, which surfaces upstream heads that direct attribution cannot see |
+| Crosscoder model diffing (Minder et al., BatchTopK) | A crosscoder trained on base and tuned activations together, with a leakage check and a shifted-latent ranking for narrow fine-tunes |
+| Contrastive activation addition | Concept directions with held-out scoring, SAE matching and steering |
+| Sparse feature circuits | Integrated-gradient feature attribution, with exact ablation as the ranking key |
+| Neuronpedia dashboards | Feature inspector: label, promoted and suppressed tokens, top activations, live dose-response |
+| OpenMOSS QK tracing (partially) | Attention read-out for the top heads; full QK attribution is still open |
+| Circuit benchmarks | Recall against the published indirect-object circuit, for the pipeline and for agent reports |
+| Multi-agent review | A reviewer pass that tries to falsify the agent's report |
+
+Also added: a second model with Neuronpedia-aligned SAEs (Pythia-70m), corpus sweeps, a result store with
+shareable links, and background jobs.
+
+Exit test (met): on 24 indirect-object prompts the pipeline finds all five answer-writing heads from the paper by
+direct attribution, and head patching recovers three of the four S-inhibition heads and both induction heads (60% of all upstream heads). The atlas independently labels 5.5 and 6.9 as
+induction heads and 4.11 as a previous-token head, matching the literature.
+
+## Phase 1 — Model coverage
+
+| Work | Why | Exit test |
+|---|---|---|
+| Register Gemma Scope / Gemma Scope 2, Llama Scope and Qwen SAE releases; read the SAELens config format generically (JumpReLU, TopK, input normalisation) | Feature views beyond GPT-2 | Reconstruction error under 15% on 1k held-out tokens per registered release, checked in CI nightly |
+| Transcoder support and direct-effect graphs (frozen attention + norm, as in circuit-tracer) | Current edges are total effects; direct effects give real circuits | Graph for the two-hop "capital of the state containing Dallas" prompt matches the circuit-tracer reference on Gemma-2-2b |
+| Remote execution backend via nnsight / NDIF for models too large to host | 70B-class open models without owning the GPUs | Same sweep bundle from local and remote backends on a shared model, within numerical tolerance |
+| Half precision, device maps, batched patching by layer | Memory and latency on 7B+ models | Sweep of a 24-token prompt on an 8B model in under 60 s on one 24 GB GPU |
+
+## Phase 2 — Scale
+
+- **Job queue.** A single-process job runner and a content-addressed result store exist. Next: move the queue to
+  Redis with workers pinned one-per-GPU, and the store to object storage.
+- **Corpus sweeps.** Corpus sweeps exist for tens of prompts. Next: datasets of 10k+ prompts; store per-feature and per-head
+  statistics in a columnar store (Parquet + DuckDB) so questions like "which features drive refusals
+  across 50k prompts" are a query.
+- **Activation cache.** Persist residual activations for a reference corpus once per checkpoint so diffing
+  and probing never re-run the model.
+- Exit test: 100k-prompt sweep on a 2B model completes unattended; p95 single-prompt latency under 5 s
+  from cache-warm workers at 20 concurrent users.
+
+## Phase 3 — Training-time interpretability
+
+- Callback for Hugging Face `Trainer` / Lightning that snapshots and diffs on a schedule and raises
+  alerts on unexpected drift (a feature family appearing, collateral KL on a held-out probe set).
+- Crosscoder diffing exists at demo scale (2k latents, 30k tokens, CPU). Next: train on millions of tokens
+  on GPU, add the full latent-scaling test from Minder et al., and Delta-Crosscoder for narrow fine-tunes.
+- Checkpoint lineage view in the web app: any two points of a run, side by side.
+- Exit test: on a model organism with a planted behaviour, the diff surfaces the planted feature in the
+  top 10 without being told what to look for.
+
+## Phase 4 — Semi-open models
+
+- Surrogate pipeline: explain an API-only model with an open model's internals, gated by measured
+  agreement between the two models' black-box attribution maps on the same inputs.
+- Use every signal a provider exposes: log-probabilities, logit bias, reasoning summaries, structured
+  outputs for forced-choice scoring; batch APIs for cost.
+- Behavioural diffing between model versions (the black-box analogue of model diff).
+- Exit test: on prompts where surrogate agreement exceeds a threshold, surrogate-derived edits
+  (removing the top-attributed span) change the hosted model's answer at a rate well above a random-span
+  baseline.
+
+## Phase 5 — Agent autonomy
+
+- Long-horizon investigations with memory across sessions, a hypothesis ledger, and automatic
+  re-verification when the model under study changes.
+- Parallel sub-investigations, one per candidate mechanism. (The reviewer pass that tries to falsify the
+  report exists.)
+- Agent-run evaluation: the indirect-object benchmark and report scorer exist. Next: add greater-than,
+  induction and docstring references and run the suite on every release.
+- Exit test: the agent recovers the documented components on at least 3 of 4 reference circuits without
+  hints, and flags its own unverified claims as such.
+
+## Phase 6 — Production hardening
+
+Authentication and per-user quotas, audit log of interventions, model allow-lists per deployment,
+autoscaling GPU workers, cost dashboards for hosted-model usage, signed bundles so shared results can
+be trusted, and a public gallery of investigations.
+
+## Standing loop
+
+Every four days a scheduled session surveys new interpretability tools and papers, records what it finds
+in `docs/RESEARCH_LOG.md`, and opens a pull request implementing the most valuable item that fits the
+current phase.
