@@ -101,8 +101,8 @@ svg text{font-family:var(--font-mono);fill:var(--ink)} svg .mut{fill:var(--muted
       <label class="wide">Prompt (the model's next token is what gets explained)<input id="f-prompt" required maxlength="2000"></label>
       <button type="submit" id="f-run">Run sweep</button>
       <label>Corrupted prompt for patching (same token count, optional)<input id="f-corrupt"></label>
-      <label>Target token<input id="f-target" placeholder="top prediction"></label>
-      <label>Contrast token<input id="f-contrast" placeholder="none"></label>
+      <label>Target token (or a set: a|b|c)<input id="f-target" placeholder="top prediction"></label>
+      <label>Contrast token (or a set)<input id="f-contrast" placeholder="none"></label>
       <label>Example<select id="f-example"></select></label>
       <label>Model<select id="f-model"></select></label>
     </form>
@@ -132,7 +132,7 @@ const tint = (v, max) => {
   return `color-mix(in oklab, var(${v >= 0 ? "--pos" : "--neg"}) ${pct}%, var(--cell))`;
 };
 const ink = (v, max) => Math.abs(v) / (max || 1) > 0.45 ? "var(--panel)" : "var(--ink)";
-const maxAbs = a => Math.max(1e-9, ...a.flat(2).map(Math.abs));
+const maxAbs = a => Math.max(1e-9, ...a.flat(2).filter(v => v !== null && v !== undefined).map(Math.abs));
 
 const S = { live: false, health: null, index: [], cache: {}, bundle: null, training: null, opts: { input: "integrated_gradients", heat: "logit_lens", heads: "dla" }, agentSteps: [] };
 
@@ -172,9 +172,11 @@ function outputPanel(b) {
   const pr = b.predictions, mx = Math.max(...pr.top.map(t => t.prob));
   const row = (t, cls) => el("div", { class: "bar" }, el("span", { class: "name" }, show(t.token)),
     el("div", { class: "track" }, el("span", { style: `left:0;width:${100 * t.prob / mx}%;background:var(${cls})` })), el("span", { class: "v" }, (100 * t.prob).toFixed(1) + "%"));
-  return panel("Output", `Next-token distribution. Metric = logit(${show(pr.target.token)})${pr.contrast ? " − logit(" + show(pr.contrast.token) + ")" : ""} = ${fmt(pr.metric)}`,
-    el("div", { class: "bars" }, pr.top.slice(0, 8).map(t => row(t, t.id === pr.target.id ? "--pos" : (pr.contrast && t.id === pr.contrast.id ? "--neg" : "--muted")))),
-    el("div", { class: "legend" }, `target rank ${pr.target.rank} · entropy ${pr.entropy.toFixed(2)} nats`));
+  const ts = pr.target_set, cs = pr.contrast_set, inT = new Set(ts ? ts.tokens : []), inC = new Set(cs ? cs.tokens : []);
+  const mdesc = ts ? `log P(any of ${ts.n} target tokens: ${ts.tokens.slice(0, 3).map(show).join(" ")} …)${cs ? ` − log P(any of ${cs.n} contrast tokens)` : ""}` : `logit(${show(pr.target.token)})${pr.contrast ? " − logit(" + show(pr.contrast.token) + ")" : ""}`;
+  return panel("Output", `Next-token distribution. Metric = ${mdesc} = ${fmt(pr.metric)}`,
+    el("div", { class: "bars" }, pr.top.slice(0, 8).map(t => row(t, (t.id === pr.target.id || inT.has(t.token)) ? "--pos" : ((pr.contrast && t.id === pr.contrast.id) || inC.has(t.token) ? "--neg" : "--muted")))),
+    el("div", { class: "legend" }, ts ? `target set holds ${(100 * ts.prob).toFixed(1)}% of the probability${cs ? `, contrast set ${(100 * cs.prob).toFixed(1)}%` : ""} · entropy ${pr.entropy.toFixed(2)} nats` : `target rank ${pr.target.rank} · entropy ${pr.entropy.toFixed(2)} nats`));
 }
 function heatPanel(b) {
   const hasPatch = b.patching && b.patching.resid;
@@ -213,7 +215,7 @@ function headsPanel(b) {
   const mlpMax = maxAbs([b.dla.mlp, b.dla.attn]);
   for (let l = H.length - 1; l >= 0; l--) {
     g.append(el("div", { class: "lab" }, "L" + l));
-    H[l].forEach((v, h) => g.append(el("div", { class: "cell", tabindex: "0", style: `background:${tint(v, mx)};color:${ink(v, mx)}`, title: `head ${l}.${h}: ${fmt(v, 3)}` }, Math.abs(v) / mx > 0.35 ? `${h}` : "")));
+    H[l].forEach((v, h) => g.append(v === null ? el("div", { class: "cell", style: "background:transparent;border:1px dashed var(--line)", title: `head ${l}.${h}: not measured (below the candidate cut)` }) : el("div", { class: "cell", tabindex: "0", style: `background:${tint(v, mx)};color:${ink(v, mx)}`, title: `head ${l}.${h}: ${fmt(v, 3)}` }, Math.abs(v) / mx > 0.35 ? `${h}` : "")));
     g.append(el("div", { class: "cell", style: `background:${tint(b.dla.attn[l], mlpMax)};color:${ink(b.dla.attn[l], mlpMax)}`, title: `attention layer ${l} total: ${fmt(b.dla.attn[l], 3)}` }, fmt(b.dla.attn[l], 1)));
     g.append(el("div", { class: "cell", style: `background:${tint(b.dla.mlp[l], mlpMax)};color:${ink(b.dla.mlp[l], mlpMax)}`, title: `MLP layer ${l}: ${fmt(b.dla.mlp[l], 3)}` }, fmt(b.dla.mlp[l], 1)));
   }
@@ -222,7 +224,7 @@ function headsPanel(b) {
   g.append(el("div", { class: "lab", style: "justify-content:center;padding:0" }, "attn"), el("div", { class: "lab", style: "justify-content:center;padding:0" }, "mlp"));
   const p = panel("Attention heads and MLP layers", S.opts.heads === "dla"
     ? `Each component's direct write onto the metric at the final position. Components sum to ${fmt(b.dla.sum_components)} (metric through the frozen final norm: ${fmt(b.dla.total)}).`
-    : S.opts.heads === "exact" ? "Share of the clean-vs-corrupted metric gap restored when one head's clean output is copied into the corrupted run. Heads that light up here but not under direct attribution act upstream, through other heads."
+    : S.opts.heads === "exact" ? "Share of the clean-vs-corrupted metric gap restored when one head's clean output is copied into the corrupted run. Heads that light up here but not under direct attribution act upstream, through other heads." + (b.head_patching.measured < b.head_patching.total ? ` On this model only the ${b.head_patching.measured} strongest candidates of ${b.head_patching.total} heads were measured exactly; dashed cells were not.` : "")
     : "Gradient estimate of the same quantity (2 forward passes instead of one per head).",
     el("div", { class: "scroll" }, g), legend("writes against target", "writes toward target"));
   $(".phead", p).append(seg(opts, S.opts.heads, k => { S.opts.heads = k; render(); }));
@@ -346,11 +348,12 @@ function componentCircuit(c, title, sub, bench) {
     panel(title, sub, el("div", { class: "scroll" }, svg), info, legend("inhibits", "excites")),
     el("div", { class: "grid g11" },
       panel("Does the circuit explain the behaviour?", `Faithfulness test: the listed components run on the clean prompt and every other head and MLP is replaced by its value from the corrupted prompt. The ${F.circuit_nodes} components in the graph keep ${(100 * F.value).toFixed(0)}% of the behaviour.`,
-        chart, el("div", { class: "legend" }, el("span", { style: "color:var(--accent)" }, "● top-ranked components"), el("span", {}, "● random components of the same count"), `x: components kept, of ${c.n_components}`)),
+        chart, (F.minimal || []).some(x => x.size) ? el("div", { class: "kv" }, F.minimal.filter(x => x.size).map(x => el("span", {}, el("b", {}, `${x.size} (${(100 * x.share).toFixed(0)}%)`), `components needed to keep ${(100 * x.threshold).toFixed(0)}%`))) : el("div", { class: "note" }, "No subset of the ranking reaches 50%: the ranking does not isolate this behaviour."),
+        el("div", { class: "legend" }, el("span", { style: "color:var(--accent)" }, "● top-ranked components"), el("span", {}, "● random components of the same count"), `x: components kept, of ${c.n_components}`)),
       bench ? panel("Against the published circuit", `Reference: ${bench.source}.`,
-        el("div", { class: "kv" }, el("span", {}, el("b", {}, `${Math.round(bench.head_recall * bench.reference_heads)} of ${bench.reference_heads}`), "reference heads in the discovered circuit"),
-          el("span", {}, el("b", {}, `${bench.edges_matching_paper_wiring} of ${bench.edges_between_reference_heads}`), "edges between reference heads that follow the paper's wiring"),
-          el("span", {}, el("b", {}, bench.edges_among_movers), "edges among name movers (found by later work)"), el("span", {}, el("b", {}, bench.edges_unexplained), "edges the paper does not have")),
+        el("div", { class: "kv" }, el("span", {}, el("b", {}, `${Math.round(bench.head_recall * bench.reference_heads)} of ${bench.reference_heads}`), "reference components in the discovered circuit"),
+          el("span", {}, el("b", {}, `${bench.edges_matching_paper_wiring} of ${bench.edges_between_reference_heads}`), "edges between reference components that follow the paper's wiring"),
+          bench.edges_among_movers ? el("span", {}, el("b", {}, bench.edges_among_movers), "edges among name movers (found by later work)") : null, el("span", {}, el("b", {}, bench.edges_unexplained), "edges the paper does not have")),
         el("div", { class: "scroll" }, el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, "Connection found"), el("th", { class: "num" }, "Edges"), el("th", {}, "In the paper's diagram"))),
           el("tbody", {}, Object.entries(bench.class_pairs).sort((a, b) => b[1].n - a[1].n).map(([k, v]) => el("tr", {}, el("td", {}, k.replace(/_/g, " ").replace("->", "→")), el("td", { class: "num" }, v.n), el("td", {}, el("span", { class: "pill " + (v.in_paper ? "high" : "low") }, v.in_paper ? "yes" : "no")))))))) :
         panel("Most important components", "Ranked by total attribution flowing through them.", el("div", { class: "chips" }, c.ranked_components.slice(0, 18).map(x => el("span", {}, `${x.id[0] === "a" ? x.id.slice(1) : "MLP " + x.id.slice(1)}  ${x.importance.toFixed(2)}`))))));
@@ -413,7 +416,8 @@ function headGrid(H, mx, title, single) {
   return el("div", { class: "scroll" }, g);
 }
 function viewAtlas() {
-  const A = S.atlas, C = S.corpus, out = el("div", { class: "grid" });
+  const A = S.atlas, Cs = S.corpora || [], out = el("div", { class: "grid" });
+  S.corpusIdx = Math.min(S.corpusIdx || 0, Math.max(0, Cs.length - 1)); const C = Cs[S.corpusIdx];
   if (!A && !C) return panel("Atlas", "Loading…");
   if (A) {
     S.atlasModel = Math.min(S.atlasModel || 0, A.models.length - 1);
@@ -426,6 +430,7 @@ function viewAtlas() {
         el("div", { class: "chips" }, R.top.filter(x => x.role === k).map(x => el("span", {}, `${x.layer}.${x.head}  ${x.score.toFixed(2)}`)))))));
   }
   if (C) {
+    if (Cs.length > 1) out.append(panel("Task-level analysis", "Each task is a set of prompts built from templates, analysed together and scored against the circuit published for that task.", seg(Cs.map((c, i) => [i, c.name]), S.corpusIdx, k => { S.corpusIdx = k; render(); })));
     S.corpusMode = C.patching ? (S.corpusMode || "patching") : "dla";
     const G = C[S.corpusMode], mx = maxAbs(G.mean), B = C.benchmark;
     const p = panel(`Corpus sweep · ${C.name}`, `The same analysis over ${C.n} prompts instead of one. The model answers ${(100 * C.accuracy).toFixed(0)}% correctly (mean metric ${fmt(C.metric_mean)}); the answer becomes the top logit-lens prediction at layer ${C.answer_layer_mean.toFixed(1)} on average.`,
@@ -630,7 +635,7 @@ async function runAgent(ev) {
 
 /* ------------------------------------------------------------------ shell */
 function formReq() { return { prompt: $("#f-prompt").value, corrupt: $("#f-corrupt").value || null, target: $("#f-target").value || null, contrast: $("#f-contrast").value || null, model: $("#f-model").value || "gpt2" }; }
-function fillForm(b) { const r = b.request || {}; const ms = $("#f-model"); if (![...ms.options].some(o => o.value === b.model.name)) ms.append(el("option", { value: b.model.name }, b.model.name)); ms.value = b.model.name; $("#f-prompt").value = b.prompt; $("#f-corrupt").value = b.corrupt_prompt || ""; $("#f-target").value = r.target || b.predictions.target.token; $("#f-contrast").value = r.contrast || (b.predictions.contrast ? b.predictions.contrast.token : ""); }
+function fillForm(b) { const r = b.request || {}; const ms = $("#f-model"); if (![...ms.options].some(o => o.value === b.model.name)) ms.append(el("option", { value: b.model.name }, b.model.name)); ms.value = b.model.name; $("#f-prompt").value = b.prompt; $("#f-corrupt").value = b.corrupt_prompt || ""; const j = v => Array.isArray(v) ? v.join("|") : v; $("#f-target").value = j(r.target) || b.predictions.target.token; $("#f-contrast").value = j(r.contrast) || (b.predictions.contrast ? b.predictions.contrast.token : ""); }
 function route() { const h = location.hash.slice(1); return ["trace", "circuit", "atlas", "concepts", "training", "blackbox", "agent"].includes(h) ? h : "trace"; }
 function render() {
   const r = route(), v = $("#view");
@@ -673,7 +678,8 @@ async function boot() {
   const shared = new URLSearchParams(location.search).get("b");
   if (S.live && shared) { try { S.bundle = await getJSON("api/bundle/" + encodeURIComponent(shared)); fillForm(S.bundle); render(); } catch (e) { $("#runnote").textContent = "That shared result is no longer stored."; } }
   if (!S.bundle && sweeps.length) await pick(sweeps[0].id);
-  for (const [kind, key] of [["training", "training"], ["atlas", "atlas"], ["corpus", "corpus"], ["concept", "concept"]]) {
+  S.corpora = []; for (const t of S.index.filter(x => x.kind === "corpus")) { try { S.corpora.push(await loadBundle(t.id)); } catch (e) {} } render();
+  for (const [kind, key] of [["training", "training"], ["atlas", "atlas"], ["concept", "concept"]]) {
     const t = S.index.find(x => x.kind === kind); if (t) { try { S[key] = await loadBundle(t.id); } catch (e) {} render(); } }
 }
 boot();

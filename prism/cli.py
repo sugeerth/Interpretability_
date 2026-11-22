@@ -1,4 +1,4 @@
-"""Command line:  prism sweep | investigate | diff | serve"""
+"""Command line:  prism sweep | investigate | diff | bench | serve"""
 from __future__ import annotations
 
 import argparse
@@ -27,6 +27,10 @@ def main(argv=None) -> int:
     d.add_argument("--probe", action="append", required=True, help="probe prompt (repeatable)")
     d.add_argument("--sae-layer", type=int, help="also diff SAE features at this layer (base model must have a registered SAE)")
     d.add_argument("-o", "--out")
+    bn = sub.add_parser("bench", help="discover task-level circuits and score them against published ones")
+    bn.add_argument("--task", choices=["ioi", "greater_than", "all"], default="all")
+    bn.add_argument("-n", type=int, default=12, help="prompts per task")
+    bn.add_argument("-o", "--out")
     s = sub.add_parser("serve", help="start the web app and API")
     s.add_argument("--host", default="127.0.0.1"); s.add_argument("--port", type=int, default=8000)
     a = ap.parse_args(argv)
@@ -37,7 +41,14 @@ def main(argv=None) -> int:
         return 0
     from .workspace import Workspace
     ws = Workspace()
-    if a.cmd == "sweep":
+    if a.cmd == "bench":
+        from .evals import REFERENCE, run_benchmark
+        tasks = list(REFERENCE) if a.task == "all" else [a.task]
+        res = [run_benchmark(ws, t, a.n, progress=lambda i, n, t=t: print(f"· {t} {i + 1}/{n}", file=sys.stderr)) for t in tasks]
+        text = "\n".join(f"{x['row']['task']}: {x['row']['components_found']} reference components found, "
+                         f"{x['row']['edges_matching']} edges follow the paper's wiring, {x['row']['needed_for_90']} components keep 90% of the behaviour"
+                         for x in res)
+    elif a.cmd == "sweep":
         res = ws.sweep(a.prompt, a.model, a.target, a.contrast, a.corrupt, progress=lambda s: print("·", s, file=sys.stderr))
         text = "\n".join(f"{f['title']}: {f['text']}" for f in res["findings"])
     elif a.cmd == "investigate":

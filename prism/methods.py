@@ -9,7 +9,7 @@ interventions are directly comparable ("hand in hand") for the same prompt.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
@@ -19,24 +19,65 @@ from .backend import Hook, WhiteBoxModel
 
 @dataclass
 class Task:
+    """A prompt and the scalar that every method explains.
+
+    ``targets`` / ``contrasts`` may hold one token each (metric = logit
+    difference) or sets of tokens (metric = log of the total probability mass
+    on the target set minus that of the contrast set). Sets express behaviours
+    that are not about a single word: "any year after 1732", "any female
+    pronoun", "any refusal opener".
+    """
     ids: torch.Tensor              # [1,T]
-    target: int
-    contrast: Optional[int] = None
+    targets: list
+    contrasts: list = field(default_factory=list)
+
+    @property
+    def target(self) -> int:
+        return self.targets[0]
+
+    @property
+    def contrast(self) -> Optional[int]:
+        return self.contrasts[0] if self.contrasts else None
+
+    @property
+    def is_set(self) -> bool:
+        return len(self.targets) > 1 or len(self.contrasts) > 1
+
+    def read(self, logits: torch.Tensor) -> torch.Tensor:
+        """logits [...,V] -> metric [...]"""
+        t = logits[..., self.targets].logsumexp(-1) if len(self.targets) > 1 else logits[..., self.targets[0]]
+        if not self.contrasts:
+            return t
+        return t - (logits[..., self.contrasts].logsumexp(-1) if len(self.contrasts) > 1 else logits[..., self.contrasts[0]])
 
     def metric(self, logits: torch.Tensor) -> torch.Tensor:
         """logits [B,T,V] -> [B]"""
-        last = logits[:, -1]
-        m = last[:, self.target]
-        return m - last[:, self.contrast] if self.contrast is not None else m
+        return self.read(logits[:, -1])
+
+    def readout_weights(self, last_logits: torch.Tensor) -> dict:
+        """Token weights w with metric ≈ Σ w_t · logit_t to first order (exact for single tokens)."""
+        w = {}
+        for toks, sign in ((self.targets, 1.0), (self.contrasts, -1.0)):
+            if toks:
+                p = last_logits[toks].softmax(-1) if len(toks) > 1 else torch.ones(1)
+                for t, v in zip(toks, p):
+                    w[t] = w.get(t, 0.0) + sign * float(v)
+        return w
 
 
-def make_task(m: WhiteBoxModel, prompt: str, target: Optional[str] = None, contrast: Optional[str] = None) -> Task:
+def _ids(m: WhiteBoxModel, spec) -> list:
+    """'a' -> one token; 'a|b|c' or a list -> a token set."""
+    if spec is None or spec == "" or spec == []:
+        return []
+    parts = spec if isinstance(spec, (list, tuple)) else (spec.split("|") if "|" in spec and spec != "|" else [spec])
+    return list(dict.fromkeys(m.token_id(p) for p in parts if p != ""))
+
+
+def make_task(m: WhiteBoxModel, prompt: str, target=None, contrast=None) -> Task:
+    """``target`` / ``contrast``: a token string, several separated by '|', or a list of strings."""
     ids = m.encode(prompt)
-    if target is None:
-        t = int(m.forward(ids).logits[0, -1].argmax())
-    else:
-        t = m.token_id(target)
-    return Task(ids, t, m.token_id(contrast) if contrast else None)
+    t = _ids(m, target) or [int(m.forward(ids).logits[0, -1].argmax())]
+    return Task(ids, t, _ids(m, contrast))
 
 
 def r(x, nd=4):
@@ -63,6 +104,10 @@ def predictions(m: WhiteBoxModel, task: Task, k: int = 10) -> dict:
         contrast=None if task.contrast is None else dict(token=m.tok.decode([task.contrast]), id=task.contrast,
                                                          prob=r(float(p[task.contrast]))),
         metric=r(float(task.metric(logits[None, None]))),
+        target_set=None if not task.is_set else dict(n=len(task.targets), prob=r(float(p[task.targets].sum())),
+                                                    tokens=[m.tok.decode([t]) for t in task.targets[:12]]),
+        contrast_set=None if not task.is_set or not task.contrasts else dict(
+            n=len(task.contrasts), prob=r(float(p[task.contrasts].sum())), tokens=[m.tok.decode([t]) for t in task.contrasts[:12]]),
         entropy=r(float(-(p * p.clamp_min(1e-12).log()).sum())),
     )
 
@@ -73,7 +118,7 @@ def logit_lens(m: WhiteBoxModel, task: Task) -> dict:
     c = m.forward(task.ids, cache=["resid_pre"])
     states = torch.cat([torch.stack(c.resid_pre, 0)[:, 0], c.resid_final], 0)      # [L+1,T,d]
     logits = m.lens(states)                                                        # [L+1,T,V]
-    grid = logits[..., task.target] - (logits[..., task.contrast] if task.contrast is not None else 0)
+    grid = task.read(logits)
     last = logits[:, -1]
     probs = last.softmax(-1)
     return dict(
@@ -90,7 +135,8 @@ def direct_logit_attribution(m: WhiteBoxModel, task: Task, top_neurons: int = 25
     """Split the metric over embeddings, attention heads, MLP layers and neurons."""
     c = m.forward(task.ids, cache=["resid_pre", "attn_out", "mlp_out", "z", "neurons"])
     final = c.resid_final[0, -1]
-    d, exact = m.unembed_dir(final, task.target, task.contrast)
+    d, exact = m.unembed_dir(final, task.readout_weights(c.logits[0, -1]))
+    exact = exact and not task.is_set          # token-set metrics are linearised at the model's own distribution
     attn = torch.stack([a[0, -1] @ d for a in c.attn_out])
     mlp = torch.stack([x[0, -1] @ d for x in c.mlp_out])
     embed = c.resid_pre[0][0, -1] @ d
@@ -232,12 +278,17 @@ def intervene(m: WhiteBoxModel, task: Task, hooks: list, k: int = 5, **describe)
 
 
 # ------------------------------------------------------- exact head patching
-def head_patching(m: WhiteBoxModel, task: Task, corrupt_ids: torch.Tensor, batch: int = 72) -> dict:
-    """Exact path-level check for every head: copy one head's clean output into
-    the corrupted run and measure how much of the metric it restores.
+def head_patching(m: WhiteBoxModel, task: Task, corrupt_ids: torch.Tensor, batch: int = 72,
+                  candidates: Optional[list] = None) -> dict:
+    """Exact path-level check for heads: copy one head's clean output into the
+    corrupted run and measure how much of the metric it restores.
 
     grid[layer][head] in units of the clean-vs-corrupted metric gap. This is
     the exact counterpart of the gradient estimate in ``activation_patching``.
+    ``candidates`` restricts the work to given (layer, head) pairs — the
+    scalable recipe on large models is to rank all heads with the two-pass
+    gradient estimate and verify only the top ones exactly; unmeasured cells
+    are None.
     """
     if corrupt_ids.shape != task.ids.shape:
         raise ValueError("clean and corrupted prompts must tokenize to the same length")
@@ -246,8 +297,8 @@ def head_patching(m: WhiteBoxModel, task: Task, corrupt_ids: torch.Tensor, batch
     m_cor = float(task.metric(m.forward(corrupt_ids).logits))
     denom = (m_clean - m_cor) or 1e-9
     dh = m.d_z // m.n_heads
-    cells = [(l, h) for l in range(m.n_layers) for h in range(m.n_heads)]
-    grid = torch.zeros(m.n_layers, m.n_heads)
+    cells = candidates if candidates is not None else [(l, h) for l in range(m.n_layers) for h in range(m.n_heads)]
+    grid = [[None] * m.n_heads for _ in range(m.n_layers)]
     for start in range(0, len(cells), batch):
         chunk = cells[start:start + batch]
 
@@ -263,8 +314,9 @@ def head_patching(m: WhiteBoxModel, task: Task, corrupt_ids: torch.Tensor, batch
         hooks = [Hook("z", l, mk(l)) for l in {l for l, _ in chunk}]
         vals = task.metric(m.forward(corrupt_ids.expand(len(chunk), -1), hooks=hooks).logits)
         for (l, h), v in zip(chunk, vals):
-            grid[l, h] = (float(v) - m_cor) / denom
-    return dict(heads=r(grid, 3), clean_metric=r(m_clean), corrupt_metric=r(m_cor))
+            grid[l][h] = round((float(v) - m_cor) / denom, 3)
+    return dict(heads=grid, clean_metric=r(m_clean), corrupt_metric=r(m_cor), measured=len(cells),
+                total=m.n_layers * m.n_heads)
 
 
 # -------------------------------------------------------- attention patterns

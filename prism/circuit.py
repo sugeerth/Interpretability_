@@ -144,7 +144,7 @@ def corpus_circuit(m: WhiteBoxModel, pairs: list, n_edges: int = 60, steps: int 
     return _build(m, items, n_edges, **kw)
 
 
-def _build(m, items, n_edges, sizes=(2, 4, 6, 8, 12, 16, 24, 32), n_random: int = 5, seed: int = 0) -> dict:
+def _build(m, items, n_edges, sizes=None, n_random: int = 5, seed: int = 0, thresholds=(0.5, 0.8, 0.9)) -> dict:
     ea = items[0][2]
     stack = torch.stack([it[2]["scores"] for it in items])
     S = stack.mean(0)
@@ -165,10 +165,35 @@ def _build(m, items, n_edges, sizes=(2, 4, 6, 8, 12, 16, 24, 32), n_random: int 
     imp = {n: float(max(inflow[vi[n]], outflow[ui[n]])) for n in comp}
     ranked = sorted(comp, key=lambda n: -imp[n])
     faith = lambda keep: sum(faithfulness(m, t, c, keep) for t, c, _ in items) / len(items)
+    if sizes is None:                       # absolute sizes for small circuits, then fractions of the model
+        sizes = sorted({2, 4, 8, 12, 16, 24, 32} | {max(2, round(f * len(comp))) for f in (0.1, 0.2, 0.3, 0.5)})
+    cache = {}
+
+    def at(k):                              # faithfulness of the k top-ranked components
+        if k not in cache:
+            cache[k] = faith(set(ranked[:k]))
+        return cache[k]
+
+    def smallest(th):
+        """Smallest prefix of the ranking that keeps ``th`` of the behaviour (binary search, then a
+        short downward scan because faithfulness is only approximately monotone in size)."""
+        if at(len(comp)) < th:
+            return None
+        lo, hi = 1, len(comp)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            lo, hi = (lo, mid) if at(mid) >= th else (mid + 1, hi)
+        while lo > 1 and at(lo - 1) >= th:
+            lo -= 1
+        return lo
+    minimal = [dict(threshold=th, size=smallest(th)) for th in thresholds]
+    for x in minimal:
+        if x["size"]:
+            x.update(share=r(x["size"] / len(comp), 3), components=ranked[:x["size"]] if x["size"] <= 40 else None)
     rng, curve = random.Random(seed), []
     for size in [s for s in sizes if s <= len(comp)]:
         rand = [faith(set(rng.sample(comp, size))) for _ in range(n_random)]
-        curve.append(dict(size=size, circuit=r(faith(set(ranked[:size])), 3),
+        curve.append(dict(size=size, circuit=r(at(size), 3),
                           random_mean=r(sum(rand) / len(rand), 3), random_max=r(max(rand), 3)))
     nodes = sorted({n for e in edges for n in e[:2]}, key=lambda n: (ea["up"] + ["out"]).index(n))
     circuit_nodes = {n for n in nodes if n not in ("emb", "out")}
@@ -186,5 +211,5 @@ def _build(m, items, n_edges, sizes=(2, 4, 6, 8, 12, 16, 24, 32), n_random: int 
                     layer=None if n in ("emb", "out") else int(n[1:].split(".")[0]),
                     index=int(n.split(".")[1]) if n[0] == "a" else None, importance=r(imp.get(n, 0.0), 3)) for n in nodes],
         edges=[edge(u, v, w) for u, v, w in edges],
-        faithfulness=dict(circuit_nodes=len(circuit_nodes), value=r(faith(circuit_nodes), 3), curve=curve),
+        faithfulness=dict(circuit_nodes=len(circuit_nodes), value=r(faith(circuit_nodes), 3), curve=curve, minimal=minimal),
         ranked_components=[dict(id=n, importance=r(imp[n], 3)) for n in ranked[:24]])

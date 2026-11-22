@@ -27,6 +27,7 @@ class Workspace:
         self.models: dict = {}
         self.saes: dict = {}
         self.max_models = max_models
+        self.exact_head_limit = 160             # models with more heads get exact patching on the top candidates only
         self.lock = threading.RLock()          # hooks mutate module state: one forward at a time per process
 
     # ------------------------------------------------------------ resources
@@ -93,7 +94,13 @@ class Workspace:
                 cids = m.encode(corrupt)
                 if cids.shape == task.ids.shape:
                     stage("patching", lambda: M.activation_patching(m, task, cids))
-                    stage("head_patching", lambda: M.head_patching(m, task, cids))
+                    cand = None
+                    if m.n_layers * m.n_heads > self.exact_head_limit:      # large model: verify only the best candidates exactly
+                        est, dl = b["patching"]["attribution_heads"], b["dla"]["heads"]
+                        score = sorted(((max(abs(est[l][h]), abs(dl[l][h]) / (abs(b["predictions"]["metric"]) + 1e-9)), l, h)
+                                        for l in range(m.n_layers) for h in range(m.n_heads)), reverse=True)
+                        cand = [(l, h) for _, l, h in score[:self.exact_head_limit // 2]]
+                    stage("head_patching", lambda: M.head_patching(m, task, cids, candidates=cand))
                     if circuit:
                         from .circuit import discover_circuit
                         stage("circuit", lambda: discover_circuit(m, task, cids, steps=3, n_random=3))
@@ -178,7 +185,7 @@ def summarize(b: dict) -> list:
                             f"head {a['layer']}.{a['head']} ({a['dla']:+.2f}) attends to {a['attends_to'][0]['token']!r} "
                             f"({a['attends_to'][0]['weight']:.2f})" for a in b["attention"][:4]) + "."))
     if "heads" in (b.get("head_patching") or {}):
-        hp = sorted(((v, l, h) for l, row in enumerate(b["head_patching"]["heads"]) for h, v in enumerate(row)), key=lambda x: -abs(x[0]))[:6]
+        hp = sorted(((v, l, h) for l, row in enumerate(b["head_patching"]["heads"]) for h, v in enumerate(row) if v is not None), key=lambda x: -abs(x[0]))[:6]
         dla_top = {(l, h) for _, l, h in sorted(((abs(v), l, h) for l, row in enumerate(b["dla"]["heads"]) for h, v in enumerate(row)), reverse=True)[:6]}
         hidden = [(v, l, h) for v, l, h in hp if (l, h) not in dla_top]
         out.append(dict(title="Heads that carry the difference (exact patching)", evidence="head_patching",
@@ -208,6 +215,8 @@ def summarize(b: dict) -> list:
                              f"{f['circuit_nodes']} of {c['n_components']} components. Strongest internal edges: " +
                              ", ".join(f"{e['src'][1:] if e['src'][0] == 'a' else e['src']}→{e['dst'][1:] if e['dst'][0] == 'a' else e['dst']} ({e['weight']:+.2f})" for e in strongest) +
                              f". Faithfulness: with only those components on clean inputs and everything else corrupted, {100 * f['value']:.0f}% of the behaviour survives" +
+                             "".join(f"; {x['size']} components ({100 * x['share']:.0f}% of the model) are enough for {100 * x['threshold']:.0f}%"
+                                     for x in f.get("minimal", []) if x["size"] and x["threshold"] == 0.9) +
                              (f"; the top {big['size']} components keep {100 * big['circuit']:.0f}% versus {100 * big['random_mean']:.0f}% for random sets of that size." if big else ".") +
                              (" Random sets do nearly as well here, so this test does not single out the circuit for this prompt." if big and big["random_mean"] > 0.3 else "")))
     for L in (b.get("features") or {}).get("layers", []):

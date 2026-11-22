@@ -222,16 +222,18 @@ class WhiteBoxModel:
         with torch.no_grad():
             return self.unembed(self.final_norm(resid) if self.final_norm is not None else resid)
 
-    def unembed_dir(self, resid_final: torch.Tensor, target: int, contrast: Optional[int] = None):
+    def unembed_dir(self, resid_final: torch.Tensor, weights: dict):
         """Direction ``d`` with ``metric ≈ Σ_components (component · d)``.
 
-        The final norm is linearised by freezing its scale at the value it
-        takes on the real residual stream (the standard direct-logit-
-        attribution convention). Returns (d, exact) where ``exact`` is False
-        if the norm type was not recognised and no frozen-scale map could be
-        verified against the true output.
+        ``weights`` maps token id -> coefficient of that token's logit in the
+        metric (``{target: 1, contrast: -1}`` for a logit difference). The
+        final norm is linearised by freezing its scale at the value it takes
+        on the real residual stream (the standard direct-logit-attribution
+        convention). Returns (d, exact) where ``exact`` is False if the norm
+        type was not recognised and no frozen-scale map could be verified
+        against the true output.
         """
-        u = self.W_U()[target] - (self.W_U()[contrast] if contrast is not None else 0)
+        u = sum(w * self.W_U()[t] for t, w in weights.items())
         n, x = self.final_norm, resid_final.detach()
         if n is None:
             return u, True

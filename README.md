@@ -9,6 +9,9 @@ input tokens ──► residual stream ──► heads / neurons ──► SAE f
   gradients)       act. patching)      attribution)        labels)          − contrast)
 ```
 
+The metric can be one token against another, or one **set of tokens** against another ("any year after 1732",
+"any female pronoun"): pass `--target "33|34|35"` or a list.
+
 On top of that sits an **investigation agent** that plans experiments, tests its hypotheses with
 ablation and steering, and writes a report; a **model-diffing** layer that follows a model through
 fine-tuning; and **black-box attribution** for models that are only reachable through an API.
@@ -20,11 +23,11 @@ fine-tuning; and **black-box attribution** for models that are only reachable th
 | White-box backend | Hooks any Hugging Face causal LM by structure (GPT-2, Llama, Gemma, Qwen, Mistral, Pythia …): residual stream, per-head outputs, MLP neurons; patch / ablate / steer at any site | `prism/backend.py` |
 | Attribution | Logit lens · integrated gradients · gradient×input · direct logit attribution (layers, heads, neurons) · activation patching · attribution patching · exact per-head patching · attention patterns · dose-response sweeps · weight-level neuron profiles | `prism/methods.py` |
 | Features | SAE encoding, exact per-feature ablation effects, IG feature attribution, a token→feature→feature→output attribution graph; feature ids match Neuronpedia | `prism/sae.py`, `prism/neuronpedia.py` |
-| Circuit discovery | Edge attribution patching with integrated gradients over every input → head → MLP → output edge, pruned to paths from input to output, with a faithfulness test against random component sets; per prompt or averaged over a task | `prism/circuit.py` |
+| Circuit discovery | Edge attribution patching with integrated gradients over every input → head → MLP → output edge, pruned to paths from input to output, with a faithfulness test against random component sets and the smallest component set that keeps 50 / 80 / 90% of the behaviour; per prompt or averaged over a task | `prism/circuit.py` |
 | Model atlas | Prompt-independent head roles (previous-token, duplicate-token, induction) measured on repeated random tokens | `prism/atlas.py` |
 | Concept directions | Difference-of-means directions from contrasting prompts, scored per layer on held-out pairs, matched to SAE features, tested by steering; needs no SAE | `prism/probe.py` |
 | Corpus sweeps | The analysis over many prompts with mean, spread and sign agreement per head, and recurring features | `prism/corpus.py` |
-| Benchmark | Scores heads, discovered circuits (nodes and wiring) and written agent reports against the published indirect-object circuit | `prism/evals.py` |
+| Benchmark | Scores heads, discovered circuits (nodes and wiring) and written agent reports against two published GPT-2 circuits: indirect object identification and greater-than | `prism/evals.py` |
 | Verification | Every sweep ablates its own top components and reports predicted vs. measured effect | `prism/workspace.py` |
 | Model diffing | Weight deltas with rank structure, per-layer representation drift, output KL, SAE-feature gains and losses; a fine-tune tracer that diffs every training phase; BatchTopK crosscoders trained on both checkpoints at once; trace diff for agent runs | `prism/diff.py`, `prism/training.py`, `prism/crosscoder.py` |
 | Semi-open models | Occlusion and counterfactual attribution for OpenAI (log-probabilities) and Anthropic (sampled answers), plus agreement scoring against an open surrogate | `prism/blackbox.py` |
@@ -66,12 +69,22 @@ with feature ids that match Neuronpedia.
 | Target | What users get | How |
 |---|---|---|
 | Static demo | The full UI on precomputed GPT-2 results, no backend | Merge to `main`, then Settings → Pages → Source: *GitHub Actions* (`.github/workflows/pages.yml`) |
-| Live app | Any prompt, interventions, agent | `docker build -t prism . && docker run -p 7860:7860 prism` — the image runs unchanged on Hugging Face Spaces (Docker), Fly.io, Cloud Run or Render |
+| Live app | Any prompt, interventions, agent | `docker build -t prism . && docker run -p 7860:7860 prism` — intended for Hugging Face Spaces (Docker), Fly.io, Cloud Run or Render. The image itself has not been built yet; the same install-then-serve steps pass in a clean virtual environment |
 
 Server settings (environment variables): `PRISM_MODELS` (allowed model ids, default GPT-2 small and Pythia-70m), `PRISM_STORE`
 (where results are kept), `PRISM_MAX_CORPUS` (largest corpus job), `PRISM_MAX_TOKENS`
 (prompt cap, default 64), `PRISM_RATE` (requests per client per minute, default 20), `ANTHROPIC_API_KEY`
 (Claude-planned agent), `OPENAI_API_KEY` (black-box attribution on OpenAI models), `NEURONPEDIA_API_KEY` (feature search).
+
+## How well does it recover known circuits?
+
+GPT-2 small, 12 prompts per task, compared with the circuit each paper reports (numbers from `web/bundles/`,
+regenerate with `scripts/build_demo.py`):
+
+| Task (reference) | Reference components found | Edges following the paper's wiring | Components needed for 90% of the behaviour |
+|---|---|---|---|
+| Indirect object (Wang et al. 2022) | 11 of 15 | 19 of 28 | 35 of 156 |
+| Greater-than (Hanna et al. 2023) | 11 of 12 | 23 of 24 | 24 of 156 |
 
 ## Reading the results honestly
 
@@ -100,7 +113,7 @@ Server settings (environment variables): `PRISM_MODELS` (allowed model ids, defa
 ## Development
 
 ```bash
-pytest -q                          # 30 tests on tiny random GPT-2 and Llama models, including the Claude-planned agent loop against a scripted transport, no network needed
+pytest -q                          # 33 tests on tiny random GPT-2 and Llama models, including the Claude-planned agent loop against a scripted transport, no network needed
 python scripts/build_demo.py       # regenerate web/bundles/ (downloads models, SAEs and WikiText-2; needs pyarrow)
 python scripts/build_static.py     # dist/ static site
 ```

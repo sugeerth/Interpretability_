@@ -37,6 +37,23 @@ def ioi_dataset(n: int = 32, seed: int = 0) -> list:
     return out
 
 
+EVENTS = ["war", "siege", "voyage", "famine", "expedition", "reign", "drought", "campaign", "plague", "rebellion", "tour", "trial"]
+
+
+def greater_than_dataset(n: int = 24, seed: int = 0) -> list:
+    """"The war lasted from the year 17YY to the year 17" — the model should
+    continue with a two-digit year greater than YY. The metric is over token
+    sets: log P(any year > YY) - log P(any year <= YY). Corruption: start year
+    ending in 01, which makes every continuation valid (Hanna et al. 2023)."""
+    rng, out = random.Random(seed), []
+    for i in range(n):
+        century, yy = rng.choice([13, 14, 15, 16, 17]), rng.randint(20, 80)
+        t = f"The {EVENTS[i % len(EVENTS)]} lasted from the year {century}{{}} to the year {century}"
+        out.append(dict(prompt=t.format(f"{yy:02d}"), corrupt=t.format("01"),
+                        target=[f"{y:02d}" for y in range(yy + 1, 100)], contrast=[f"{y:02d}" for y in range(0, yy + 1)]))
+    return out
+
+
 def corpus_sweep(ws, items: list, model: str = "gpt2", sae_layers: Optional[list] = None, features_k: int = 8,
                  progress=None, name: str = "corpus", circuit_prompts: int = 0) -> dict:
     m = ws.model(model)
@@ -57,7 +74,7 @@ def corpus_sweep(ws, items: list, model: str = "gpt2", sae_layers: Optional[list
             if it.get("corrupt"):
                 cids = m.encode(it["corrupt"])
                 if cids.shape == task.ids.shape:
-                    patch.append(torch.tensor(M.head_patching(m, task, cids)["heads"]))
+                    patch.append(torch.tensor(M.head_patching(m, task, cids)["heads"], dtype=torch.float))
                 else:
                     skipped += 1
             if saes:

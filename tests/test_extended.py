@@ -24,7 +24,7 @@ def test_head_patching_matches_manual_patch(model):
 
     def patch(z):                                   # copy head 1.2's clean output by hand
         z = z.clone(); z[..., 2 * dh:3 * dh] = clean.z[1][..., 2 * dh:3 * dh]; return z
-    manual = M.intervene(model, M.Task(cor, t.target, t.contrast), [M.Hook("z", 1, patch)])
+    manual = M.intervene(model, M.Task(cor, t.targets, t.contrasts), [M.Hook("z", 1, patch)])
     gap = res["clean_metric"] - res["corrupt_metric"]
     assert abs((manual["metric_after"] - manual["metric_before"]) - float(hp[1, 2]) * gap) < 2e-3
 
@@ -168,3 +168,47 @@ def test_circuit_scoring():
 def test_neuron_reads_tokens(model):
     prof = M.neuron_profile(model, 0, 1)
     assert prof["reads"] and len(prof["reads"]) == 8
+
+
+def test_token_set_metric(model):
+    t = M.make_task(model, "hello world", "a|b|c", ["x", "y"])
+    assert len(t.targets) == 3 and len(t.contrasts) == 2 and t.is_set
+    logits = model.forward(t.ids).logits
+    lp = logits[0, -1].log_softmax(-1)
+    expected = lp[t.targets].logsumexp(0) - lp[t.contrasts].logsumexp(0)       # log-odds of the two sets
+    assert abs(float(t.metric(logits)) - float(expected)) < 1e-4
+    p = M.predictions(model, t)
+    assert p["target_set"]["n"] == 3 and 0 < p["target_set"]["prob"] < 1
+    d = M.direct_logit_attribution(model, t)
+    assert not d["exact_norm"] and abs(d["total"] - d["sum_components"]) < 1e-2    # still a full decomposition of its linearisation
+    assert sum(M.Task(t.ids, [5]).readout_weights(logits[0, -1]).values()) == 1.0
+    w = t.readout_weights(logits[0, -1])
+    assert abs(sum(v for v in w.values() if v > 0) - 1) < 1e-5 and abs(sum(v for v in w.values() if v < 0) + 1) < 1e-5
+    single = M.make_task(model, "hello world", "a", "b")
+    assert not single.is_set and M.direct_logit_attribution(model, single)["exact_norm"]
+
+
+def test_minimal_circuit_and_candidates(model):
+    from prism.circuit import discover_circuit
+    t = M.make_task(model, "hello world", "a", "b")
+    cor = model.encode("jello world")
+    c = discover_circuit(model, t, cor, n_edges=20, steps=2, n_random=1)
+    mins = {x["threshold"]: x for x in c["faithfulness"]["minimal"]}
+    assert set(mins) == {0.5, 0.8, 0.9}
+    sizes = [mins[th]["size"] for th in (0.5, 0.8, 0.9) if mins[th]["size"]]
+    assert sizes == sorted(sizes) and all(1 <= s <= c["n_components"] for s in sizes)
+    hp = M.head_patching(model, t, cor, candidates=[(0, 1), (2, 3)])
+    assert hp["measured"] == 2 and hp["heads"][0][1] is not None and hp["heads"][1][0] is None
+    full = M.head_patching(model, t, cor)
+    assert abs(full["heads"][2][3] - hp["heads"][2][3]) < 1e-3
+
+
+def test_greater_than_dataset_and_reference():
+    from prism.corpus import greater_than_dataset
+    from prism.evals import score_circuit
+    d = greater_than_dataset(5)
+    assert all(len(x["target"]) + len(x["contrast"]) == 100 and x["prompt"] != x["corrupt"] for x in d)
+    circ = dict(nodes=[dict(id="a5.5", kind="head"), dict(id="m9", kind="mlp"), dict(id="m2", kind="mlp")],
+                edges=[dict(src="a5.5", dst="m9"), dict(src="m9", dst="out"), dict(src="m9", dst="a5.5")])
+    s = score_circuit("greater_than", circ)
+    assert s["circuit_heads"] == 3 and s["head_recall"] == round(2 / 12, 3) and s["edges_matching_paper_wiring"] == 2 and s["edges_unexplained"] == 1

@@ -8,7 +8,7 @@ from prism.agent.loop import investigate_offline          # noqa: E402
 from prism.blackbox import LocalScorer, occlusion, surrogate_agreement  # noqa: E402
 from prism.training import trace_finetune                 # noqa: E402
 from prism.atlas import atlas                             # noqa: E402
-from prism.corpus import corpus_sweep, ioi_dataset        # noqa: E402
+from prism.corpus import corpus_sweep, greater_than_dataset, ioi_dataset        # noqa: E402
 from prism.crosscoder import crosscoder_diff              # noqa: E402
 from prism.evals import score_circuit, score_grids                       # noqa: E402
 from prism.probe import concept_direction                 # noqa: E402
@@ -34,9 +34,9 @@ SWEEPS = [
     ("capital", "Factual recall: Eiffel Tower → Paris", dict(
         prompt="The Eiffel Tower is located in the city of", target=" Paris", contrast=" Rome",
         corrupt="The Colosseum is located in the city of")),
-    ("greater", "Greater-than: the war lasted from 1732 to 17", dict(
-        prompt="The war lasted from the year 1732 to the year 17", target="45", contrast="20",
-        corrupt="The war lasted from the year 1701 to the year 17")),
+    ("greater", "Greater-than: the war lasted from 1732 to 17 (token-set metric)", dict(
+        prompt="The war lasted from the year 1732 to the year 17", target=[f"{y:02d}" for y in range(33, 100)],
+        contrast=[f"{y:02d}" for y in range(0, 33)], corrupt="The war lasted from the year 1701 to the year 17")),
 ]
 for name, title, kw in SWEEPS:
     res = investigate_offline(ws=ws, **kw)
@@ -44,8 +44,9 @@ for name, title, kw in SWEEPS:
     b["agent"] = res
     b["request"] = kw
     # black-box cross-check on the same prompt: occlusion vs integrated gradients
-    occ = occlusion(LocalScorer(m, kw["target"], kw["contrast"]), kw["prompt"])
-    b["blackbox"] = dict(occ, provider="local", access="open-weights (as black box)", target=kw["target"])
+    one = lambda v: v[len(v) // 2] if isinstance(v, list) else v        # occlusion tracks one representative token
+    occ = occlusion(LocalScorer(m, one(kw["target"]), one(kw["contrast"])), kw["prompt"])
+    b["blackbox"] = dict(occ, provider="local", access="open-weights (as black box)", target=one(kw["target"]))
     save(name, title, "sweep", b)
 
 PY = "EleutherAI/pythia-70m-deduped"
@@ -72,6 +73,10 @@ cs = corpus_sweep(ws, ioi_dataset(24), name="Indirect object identification, 24 
 cs["circuit_benchmark"] = score_circuit("ioi", cs["circuit"])
 cs["benchmark"] = score_grids("ioi", cs["dla"]["mean"], cs["patching"]["mean"])
 save("corpus", "Corpus sweep: indirect object, 24 prompts", "corpus", cs)
+
+gt = corpus_sweep(ws, greater_than_dataset(24), name="Greater-than, 24 prompts", circuit_prompts=12)
+gt["circuit_benchmark"] = score_circuit("greater_than", gt["circuit"])
+save("corpus-greater", "Corpus sweep: greater-than, 24 prompts", "corpus", gt)
 
 # ---- concept direction: sentiment
 POS = ["I absolutely loved this movie, it was", "The food was delicious and the service was", "What a wonderful day, I feel",

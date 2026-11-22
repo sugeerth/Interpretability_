@@ -378,7 +378,7 @@ def investigate_offline(prompt: str, ws: Workspace, model: str = "gpt2", target=
     hp = (b.get("head_patching") or {}).get("heads")
     if hp:
         direct = {(l, h) for _, l, h in sorted(((abs(v), l, h) for l, row in enumerate(b["dla"]["heads"]) for h, v in enumerate(row)), reverse=True)[:6]}
-        ups = [(v, l, h) for v, l, h in sorted(((v, l, h) for l, row in enumerate(hp) for h, v in enumerate(row)), key=lambda x: -abs(x[0]))[:6] if (l, h) not in direct]
+        ups = [(v, l, h) for v, l, h in sorted(((v, l, h) for l, row in enumerate(hp) for h, v in enumerate(row) if v is not None), key=lambda x: -abs(x[0]))[:6] if (l, h) not in direct]
         if ups:
             roles = {(t["layer"], t["head"]): t["role"] for t in json.loads(inv.log("head_roles", {}, inv.roles()))["top"]}
             inv.findings.append(dict(
@@ -392,7 +392,9 @@ def investigate_offline(prompt: str, ws: Workspace, model: str = "gpt2", target=
         inner = sorted((e for e in circ["edges"] if e["src"] != "emb" and e["dst"] != "out"), key=lambda e: -abs(e["weight"]))[:4]
         last = f["curve"][-1] if f["curve"] else dict(size=0, circuit=0, random_mean=0)
         inv.findings.append(dict(
-            claim=f"A {f['circuit_nodes']}-component circuit carries {100 * f['value']:.0f}% of the behaviour; the top {last['size']} components carry {100 * last['circuit']:.0f}%.",
+            claim=next((f"{x['size']} of {circ['n_components']} components ({100 * x['share']:.0f}%) are enough to keep 90% of the behaviour."
+                        for x in f.get("minimal", []) if x["threshold"] == 0.9 and x["size"]),
+                       f"A {f['circuit_nodes']}-component circuit carries {100 * f['value']:.0f}% of the behaviour; the top {last['size']} components carry {100 * last['circuit']:.0f}%."),
             evidence="Kept components run on clean inputs, all others take corrupted-run values. Random sets of the same size keep "
                      f"{100 * last['random_mean']:.0f}%. Strongest internal edges: " + ", ".join(f"{e['src']}→{e['dst']} ({e['weight']:+.2f})" for e in inner) + ".",
             confidence="high" if f["value"] > 0.6 else "medium"))

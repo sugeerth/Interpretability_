@@ -3,6 +3,17 @@
 A running survey of interpretability tooling, newest first. Each entry says what was found, what it means
 for Prism, and what (if anything) was done about it. Entries are added by the scheduled research session.
 
+## 2026-11-22 (later) — second benchmark
+
+| Method | Source | Implemented as | Measured |
+|---|---|---|---|
+| Greater-than circuit as a reference | Hanna, Liu & Variengien 2023 | `prism/evals.py`, `prism/corpus.py:greater_than_dataset` | 11 of 12 reference components found (MLPs 8–11; heads 5.1, 5.5, 6.9, 7.10, 8.8, 8.11, 9.1; 6.1 missed); 23 of 24 edges follow the paper's wiring; 24 of 156 components keep 90%. |
+| Probability-mass metrics over token sets | Same paper's metric | `prism/methods.py:Task` | Direct attribution becomes a first-order decomposition for sets (flagged as not exact). |
+| Rank by gradient, verify exactly | Attribution patching practice | `Workspace.exact_head_limit` | Qwen head patching: 80 of 336 heads measured exactly. |
+
+The reference component lists are written from memory of the papers and were not re-fetched; the close match on
+both tasks is consistent with them being right, but check the papers before citing these lists.
+
 ## 2026-11-22 — circuits (no new survey; built from methods already in the literature)
 
 | Method | Source | Implemented as | Measured |

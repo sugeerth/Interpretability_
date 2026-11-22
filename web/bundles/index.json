@@ -11,7 +11,7 @@
  },
  {
   "id": "greater",
-  "title": "Greater-than: the war lasted from 1732 to 17",
+  "title": "Greater-than: the war lasted from 1732 to 17 (token-set metric)",
   "kind": "sweep"
  },
  {
@@ -32,6 +32,11 @@
  {
   "id": "corpus",
   "title": "Corpus sweep: indirect object, 24 prompts",
+  "kind": "corpus"
+ },
+ {
+  "id": "corpus-greater",
+  "title": "Corpus sweep: greater-than, 24 prompts",
   "kind": "corpus"
  },
  {

@@ -32,7 +32,16 @@ from ..agent.loop import Investigation, has_llm, investigate, investigate_offlin
 from ..store import BundleStore, Jobs
 from ..workspace import Workspace
 
-WEB = Path(__file__).resolve().parents[2] / "web"
+def _web_dir() -> Path:
+    """Static files: $PRISM_WEB, else ./web next to the source tree (editable install), else ./web in
+    the working directory (pip-installed package, as in the Docker image)."""
+    for cand in (os.environ.get("PRISM_WEB"), Path(__file__).resolve().parents[2] / "web", Path.cwd() / "web"):
+        if cand and (Path(cand) / "index.html").exists():
+            return Path(cand)
+    raise RuntimeError("web assets not found; set PRISM_WEB to the directory that contains index.html")
+
+
+WEB = _web_dir()
 ALLOWED = [m.strip() for m in os.environ.get("PRISM_MODELS", "gpt2,EleutherAI/pythia-70m-deduped").split(",") if m.strip()]
 MAX_TOKENS = int(os.environ.get("PRISM_MAX_TOKENS", "64"))
 RATE = int(os.environ.get("PRISM_RATE", "20"))

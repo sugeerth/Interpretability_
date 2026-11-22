@@ -58,6 +58,27 @@ paper's 15 heads; 19 of its 28 edges between reference heads follow the paper's 
 Known weak spots, measured: on Qwen the top 32 of 360 components keep only 35%, and integrated gradients still
 misses its completeness check there; on Pythia-70m the faithfulness test does not discriminate (random sets keep 53%).
 
+## Phase 0.9 — A second benchmark, token-set metrics, minimal circuits (done)
+
+- **Token-set metrics**: the explained quantity can be the log-odds of one set of tokens against another, so
+  behaviours that are not about a single word can be studied with every method.
+- **Greater-than benchmark** (Hanna et al. 2023) alongside indirect object identification; `prism bench` reproduces both.
+- **Minimal circuits**: the smallest ranked component set that keeps 50 / 80 / 90% of the behaviour.
+- **Scalable head patching**: on models with more than 160 heads, all heads are ranked by the two-pass gradient
+  estimate and only the top candidates are verified exactly.
+- **Deployment fix**: the server could not find its web assets when installed as a package (as in the Docker
+  image); fixed and checked with a clean install.
+
+Exit test (met), GPT-2 small, 12 prompts per task:
+
+| Task | Reference components found | Edges following the paper's wiring | Components for 90% of the behaviour |
+|---|---|---|---|
+| Indirect object | 11 of 15 | 19 of 28 | 35 of 156 |
+| Greater-than | 11 of 12 | 23 of 24 | 24 of 156 |
+
+Still weak, measured: Qwen2.5-0.5B needs 159 of 360 components for 90% on the indirect-object prompt, so the
+ranking does not yet isolate a compact circuit there.
+
 ## Phase 1 — Model coverage
 
 | Work | Why | Exit test |
