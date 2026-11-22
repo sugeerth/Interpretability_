@@ -234,7 +234,7 @@ function neuronsPanel(b) {
     el("div", { class: "bars" }, ns.map(n => el("div", { class: "bar" }, el("span", { class: "name" }, `L${n.layer} · ${n.index}`),
       el("div", { class: "track" }, el("span", { style: `${n.dla >= 0 ? "left:50%" : "right:50%"};width:${50 * Math.abs(n.dla) / mx}%;background:var(${n.dla >= 0 ? "--pos" : "--neg"})` })),
       el("span", { class: "v" }, fmt(n.dla)),
-      n.promotes ? el("span", { class: "sub", style: "grid-column:1/-1;margin:-3px 0 2px;font-size:11.5px" }, "weights promote ", el("span", { class: "mono" }, n.promotes.slice(0, 4).map(show).join(" ")), " · suppress ", el("span", { class: "mono" }, n.suppresses.slice(0, 4).map(show).join(" "))) : null))));
+      n.promotes ? el("span", { class: "sub", style: "grid-column:1/-1;margin:-3px 0 2px;font-size:11.5px" }, n.reads ? ["weights read ", el("span", { class: "mono" }, n.reads.slice(0, 3).map(show).join(" ")), " → promote "] : "weights promote ", el("span", { class: "mono" }, n.promotes.slice(0, 4).map(show).join(" ")), " · suppress ", el("span", { class: "mono" }, n.suppresses.slice(0, 4).map(show).join(" "))) : null))));
 }
 function attentionPanel(b) {
   if (!Array.isArray(b.attention) || !b.attention.length) return null;
@@ -310,8 +310,58 @@ function viewTrace(b) {
 }
 
 /* --------------------------------------------------------------- circuit */
+function componentCircuit(c, title, sub, bench) {
+  if (!c || !c.edges) return null;
+  const NS = "http://www.w3.org/2000/svg", svg = document.createElementNS(NS, "svg");
+  const mk = (tag, a, txt) => { const n = document.createElementNS(NS, tag); for (const k in a) n.setAttribute(k, a[k]); if (txt !== undefined) n.textContent = txt; return n; };
+  const layers = [...new Set(c.nodes.filter(n => n.layer !== null).map(n => n.layer))].sort((a, b) => a - b);
+  const cols = ["emb", ...layers, "out"], colW = Math.max(64, Math.min(96, 1080 / cols.length)), W = 30 + colW * cols.length;
+  const byCol = {}; c.nodes.forEach(n => { const k = n.kind === "emb" ? "emb" : n.kind === "out" ? "out" : n.layer; (byCol[k] = byCol[k] || []).push(n); });
+  const rows = Math.max(...Object.values(byCol).map(v => v.length)), H = 60 + rows * 46;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("width", W); svg.setAttribute("height", H); svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "Circuit graph: components as nodes arranged by layer, attribution edges between them");
+  const pos = {};
+  cols.forEach((k, ci) => { const ns = (byCol[k] || []).sort((a, b) => (a.kind === "mlp") - (b.kind === "mlp") || (a.index || 0) - (b.index || 0));
+    ns.forEach((n, i) => pos[n.id] = [30 + colW * (ci + 0.5), 36 + (H - 60) * (i + 0.5) / ns.length]);
+    svg.append(mk("text", { x: 30 + colW * (ci + 0.5), y: 14, "font-size": 10.5, "text-anchor": "middle", class: "mut" }, k === "emb" ? "input" : k === "out" ? "output" : "layer " + k)); });
+  const mx = maxAbs(c.edges.map(e => e.weight)), eg = mk("g", {}), ng = mk("g", {});
+  const els = c.edges.map(e => { const [x1, y1] = pos[e.src], [x2, y2] = pos[e.dst], mxx = (x1 + x2) / 2;
+    const p = mk("path", { d: `M${x1},${y1} C${mxx},${y1} ${mxx},${y2} ${x2},${y2}`, fill: "none", stroke: e.weight >= 0 ? "var(--pos)" : "var(--neg)", "stroke-width": (0.7 + 5 * Math.abs(e.weight) / mx).toFixed(2), "stroke-opacity": 0.45 });
+    eg.append(p); return [e, p]; });
+  const label = id => id === "emb" ? "tokens" : id === "out" ? "answer" : id[0] === "a" ? id.slice(1) : "MLP " + id.slice(1);
+  const info = el("div", { class: "note" }, "Hover or focus a component to isolate its edges.");
+  const focus = id => els.forEach(([e, p]) => p.setAttribute("stroke-opacity", !id ? 0.45 : (e.src === id || e.dst === id) ? 0.95 : 0.05));
+  const role = id => { const R = S.atlas && S.atlas.models[0] && S.atlas.models[0].roles.top.find(t => "a" + t.layer + "." + t.head === id); return R ? R.role.replace(/_/g, "-") + " head" : null; };
+  c.nodes.forEach(n => { const [cx, cy] = pos[n.id], g = mk("g", { tabindex: 0, style: "cursor:pointer" }), w = n.kind === "mlp" ? 46 : 38;
+    g.append(mk("rect", { x: cx - w / 2, y: cy - 10, width: w, height: 20, rx: n.kind === "mlp" ? 2 : 10, fill: n.kind === "out" ? "var(--accent)" : "var(--panel)", stroke: "var(--ink)", "stroke-width": 1 }),
+      mk("text", { x: cx, y: cy + 3.5, "font-size": 10.5, "text-anchor": "middle", style: n.kind === "out" ? "fill:var(--accent-ink)" : "" }, label(n.id)));
+    const on = () => { focus(n.id); const ins = c.edges.filter(e => e.dst === n.id).sort((a, b) => Math.abs(b.weight) - Math.abs(a.weight)).slice(0, 3), outs = c.edges.filter(e => e.src === n.id).sort((a, b) => Math.abs(b.weight) - Math.abs(a.weight)).slice(0, 3);
+      const f = e => `${label(e.src)}→${label(e.dst)} ${fmt(e.weight)}${e.token ? " at " + show(e.token) : ""}`;
+      info.textContent = `${n.kind === "head" ? "Head " : ""}${label(n.id)}${role(n.id) && c.sequential !== undefined && bench ? " · " + role(n.id) : ""}` + (ins.length ? " · reads from: " + ins.map(f).join(", ") : "") + (outs.length ? " · writes to: " + outs.map(f).join(", ") : ""); };
+    g.addEventListener("mouseenter", on); g.addEventListener("focus", on); g.addEventListener("mouseleave", () => focus(null)); g.addEventListener("blur", () => focus(null)); ng.append(g); });
+  svg.append(eg, ng);
+  const F = c.faithfulness, cv = F.curve;
+  const chart = cv.length ? lineChart([{ values: cv.map(x => x.circuit), color: "var(--accent)", dots: true, width: 2.2 }, { values: cv.map(x => x.random_mean), color: "var(--muted)", dots: true }], cv.map(x => String(x.size)), v => (100 * v).toFixed(0) + "%") : null;
+  return el("div", { class: "grid" },
+    panel(title, sub, el("div", { class: "scroll" }, svg), info, legend("inhibits", "excites")),
+    el("div", { class: "grid g11" },
+      panel("Does the circuit explain the behaviour?", `Faithfulness test: the listed components run on the clean prompt and every other head and MLP is replaced by its value from the corrupted prompt. The ${F.circuit_nodes} components in the graph keep ${(100 * F.value).toFixed(0)}% of the behaviour.`,
+        chart, el("div", { class: "legend" }, el("span", { style: "color:var(--accent)" }, "● top-ranked components"), el("span", {}, "● random components of the same count"), `x: components kept, of ${c.n_components}`)),
+      bench ? panel("Against the published circuit", `Reference: ${bench.source}.`,
+        el("div", { class: "kv" }, el("span", {}, el("b", {}, `${Math.round(bench.head_recall * bench.reference_heads)} of ${bench.reference_heads}`), "reference heads in the discovered circuit"),
+          el("span", {}, el("b", {}, `${bench.edges_matching_paper_wiring} of ${bench.edges_between_reference_heads}`), "edges between reference heads that follow the paper's wiring"),
+          el("span", {}, el("b", {}, bench.edges_among_movers), "edges among name movers (found by later work)"), el("span", {}, el("b", {}, bench.edges_unexplained), "edges the paper does not have")),
+        el("div", { class: "scroll" }, el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, "Connection found"), el("th", { class: "num" }, "Edges"), el("th", {}, "In the paper's diagram"))),
+          el("tbody", {}, Object.entries(bench.class_pairs).sort((a, b) => b[1].n - a[1].n).map(([k, v]) => el("tr", {}, el("td", {}, k.replace(/_/g, " ").replace("->", "→")), el("td", { class: "num" }, v.n), el("td", {}, el("span", { class: "pill " + (v.in_paper ? "high" : "low") }, v.in_paper ? "yes" : "no")))))))) :
+        panel("Most important components", "Ranked by total attribution flowing through them.", el("div", { class: "chips" }, c.ranked_components.slice(0, 18).map(x => el("span", {}, `${x.id[0] === "a" ? x.id.slice(1) : "MLP " + x.id.slice(1)}  ${x.importance.toFixed(2)}`))))));
+}
 function viewCircuit(b) {
-  if (!b.features) return panel("Attribution graph", "Needs SAE features, which this model does not have.");
+  const cc = componentCircuit(b.circuit, "Component circuit · who talks to whom", "Every edge between the input, attention heads, MLPs and the output is scored by edge attribution patching with integrated gradients (" + ((b.circuit && b.circuit.method) || "") + "). Shown: the strongest edges that lie on a path from input to output. Pills are heads (layer.head), boxes are MLPs.");
+  const fg = featureGraph(b);
+  return el("div", { class: "grid" }, cc || (b.corrupt_prompt ? null : el("div", { class: "note" }, "Add a corrupted prompt to discover the component circuit: edges are defined by the difference between the two prompts.")), fg);
+}
+function featureGraph(b) {
+  if (!b.features) return panel("Feature graph", "Needs SAE features, which this model does not have.");
   const G = b.features.graph, toks = G.nodes.filter(n => n.kind === "token"), feats = G.nodes.filter(n => n.kind === "feature");
   const layers = [...new Set(feats.map(f => f.layer))].sort((a, c) => a - c);
   const colW = Math.max(54, Math.min(86, 1100 / toks.length)), W = 70 + colW * toks.length, rowH = 120, H = 90 + rowH * (layers.length + 1);
@@ -349,7 +399,7 @@ function viewCircuit(b) {
   feats.forEach(f => node(f, "", 9, tint(f.effect, fmx)));
   node({ id: "out", kind: "output", label: G.nodes.find(n => n.id === "out").label }, show(G.nodes.find(n => n.id === "out").label), 10, "var(--accent)");
   svg.append(eg, ng);
-  return el("div", { class: "grid" }, panel("Attribution graph", "Input tokens (bottom) feed SAE features (rows by layer) which drive the output (top). Edge width is the share of the destination it accounts for (gradient × activation between nodes, exact ablation into the output). Node colour is the exact ablation effect on the metric. Edges are total effects through the real model, not a replacement model.",
+  return el("div", { class: "grid" }, panel("Feature graph", "Input tokens (bottom) feed SAE features (rows by layer) which drive the output (top). Edge width is the share of the destination it accounts for (gradient × activation between nodes, exact ablation into the output). Node colour is the exact ablation effect on the metric. Edges are total effects through the real model, not a replacement model.",
     el("div", { class: "scroll" }, svg), info, legend("inhibits", "excites")), featuresPanel(b));
 }
 
@@ -390,6 +440,7 @@ function viewAtlas() {
         el("div", { class: "scroll" }, el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, "Head class in the paper"), el("th", {}, "Recovered by head patching"))),
           el("tbody", {}, cls.map(([c, hs]) => el("tr", {}, el("td", {}, c.replace(/_/g, " ")), el("td", { class: "mono" }, hs.length ? hs.map(h => h.join(".")).join("  ") : "none in top " + B.k)))))),
         el("div", { class: "note" }, "Misses are informative: the heads that act earliest each carry a small share of the effect, so they fall below the top-" + B.k + " cut.")) : null));
+    if (C.circuit) out.append(componentCircuit(C.circuit, `Task-level circuit · averaged over ${C.circuit.n_prompts} prompts`, "Edge scores averaged across prompts with different names, places and objects, so the graph describes the task instead of one sentence. Hover a head to see its role from the atlas above.", C.circuit_benchmark));
     out.append(panel("Features that recur across the corpus", "SAE features ranked by how often they are among a prompt's most causally important features, times their mean ablation effect.",
       el("div", { class: "grid", style: "grid-template-columns:repeat(auto-fit,minmax(260px,1fr))" }, C.features.slice(0, 12).map(f => el("div", { class: "feat" }, el("span", { class: "expl" }, f.explanation || "no Neuronpedia label"),
         el("span", { class: "meta" }, `L${f.layer} #${f.index} · in ${(100 * f.frequency).toFixed(0)}% of prompts · at ${f.tokens.slice(0, 2).map(show).join(" ")} · `, f.url ? el("a", { href: f.url, target: "_blank", rel: "noopener" }, "Neuronpedia") : ""),

@@ -251,5 +251,11 @@ class WhiteBoxModel:
     def attn_proj_matrix(self, layer: int) -> torch.Tensor:
         return _in_out_matrix(self._attn_proj(self.blocks[layer]))    # [H*d_head, d]
 
+    def mlp_in_matrix(self, layer: int) -> Optional[torch.Tensor]:
+        """Input weights of the MLP neurons as [d, d_mlp], or None if the layout is not recognised
+        (gated MLPs have two input projections; the ungated one is returned)."""
+        mod = _first(self._mlp(self.blocks[layer]), ["c_fc", "up_proj", "fc1", "dense_h_to_4h", "fc_in"])
+        return None if mod is None else _in_out_matrix(mod)
+
     def mlp_proj_matrix(self, layer: int) -> torch.Tensor:
         return _in_out_matrix(self._mlp_proj(self.blocks[layer]))     # [d_mlp, d]

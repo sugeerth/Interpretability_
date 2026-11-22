@@ -107,23 +107,40 @@ def direct_logit_attribution(m: WhiteBoxModel, task: Task, top_neurons: int = 25
 
 
 # -------------------------------------------------------- input attribution
-def input_attribution(m: WhiteBoxModel, task: Task, steps: int = 32) -> dict:
-    """Gradient×input and integrated gradients over the input embeddings."""
+def input_attribution(m: WhiteBoxModel, task: Task, steps: int = 48, max_steps: int = 192) -> dict:
+    """Gradient×input and integrated gradients over the input embeddings.
+
+    The IG baseline is the mean token embedding at every position (an
+    uninformative but in-distribution input). A zero baseline is degenerate
+    for models whose first operation is a norm: on RMSNorm architectures it
+    leaves the path integral far from the true metric gap. The step count is
+    doubled until the attributions sum to within 5% of that gap, and the
+    remaining completeness error is returned so callers can judge the result.
+    """
     emb = m.embed(task.ids).detach()
     e = emb.clone().requires_grad_(True)
     val = task.metric(m.forward(embeds=e, grad=True).logits)
     g, = torch.autograd.grad(val.sum(), e)
     gxi = (g * emb).sum(-1)[0]
-    total = torch.zeros_like(emb)
-    alphas = (torch.arange(steps, device=emb.device) + 0.5) / steps          # midpoint Riemann rule
-    for chunk in alphas.split(16):
-        x = (chunk.view(-1, 1, 1) * emb).requires_grad_(True)
-        gr, = torch.autograd.grad(task.metric(m.forward(embeds=x, grad=True).logits).sum(), x)
-        total += gr.sum(0, keepdim=True)
-    ig = (emb * total / steps).sum(-1)[0]
-    base = float(task.metric(m.forward(embeds=torch.zeros_like(emb)).logits))
-    return dict(grad_x_input=r(gxi), integrated_gradients=r(ig), metric=r(float(val.detach())), baseline_metric=r(base),
-                ig_completeness_error=r(float(ig.sum()) - (float(val.detach()) - base)))
+    base = m.embed.weight.detach().mean(0).expand_as(emb)
+    full = float(val.detach())
+    base_metric = float(task.metric(m.forward(embeds=base).logits))
+    gap = full - base_metric
+    while True:
+        total = torch.zeros_like(emb)
+        alphas = (torch.arange(steps, device=emb.device) + 0.5) / steps      # midpoint Riemann rule
+        for chunk in alphas.split(16):
+            x = (base + chunk.view(-1, 1, 1) * (emb - base)).requires_grad_(True)
+            gr, = torch.autograd.grad(task.metric(m.forward(embeds=x, grad=True).logits).sum(), x)
+            total += gr.sum(0, keepdim=True)
+        ig = ((emb - base) * total / steps).sum(-1)[0]
+        err = float(ig.sum()) - gap
+        if abs(err) <= 0.05 * abs(gap) or steps * 2 > max_steps:
+            break
+        steps *= 2
+    return dict(grad_x_input=r(gxi), integrated_gradients=r(ig), metric=r(full), baseline_metric=r(base_metric),
+                baseline="mean token embedding", steps=steps, ig_completeness_error=r(err),
+                ig_relative_error=r(abs(err) / (abs(gap) + 1e-9), 3))
 
 
 # ------------------------------------------------------- activation patching
@@ -266,14 +283,21 @@ def attention_patterns(m: WhiteBoxModel, task: Task, heads: list) -> list:
 
 # ---------------------------------------------------- weight-level profiles
 def neuron_profile(m: WhiteBoxModel, layer: int, index: int, k: int = 8) -> dict:
-    """What a neuron does according to the weights alone: the tokens its
-    output weight promotes and suppresses through the unembedding, and the
-    tokens whose embeddings most excite its input weight (layer-0 reading)."""
+    """What a neuron does according to the weights alone, input to output:
+    ``reads``     tokens whose embeddings most excite its input weight (the direct
+                  embedding -> neuron path; exact for layer 0, a first-order reading deeper)
+    ``promotes`` / ``suppresses``  tokens its output weight pushes through the unembedding."""
     w_out = m.mlp_proj_matrix(layer)[index]                       # [d]
     logit = m.W_U() @ w_out
     hi, lo = logit.topk(k), (-logit).topk(k)
     dec = lambda idx: [m.tok.decode([int(i)]) for i in idx]
-    return dict(layer=layer, index=index, promotes=dec(hi.indices), suppresses=dec(lo.indices),
+    reads = None
+    W_in = m.mlp_in_matrix(layer)
+    if W_in is not None:                                           # direct path token embedding -> neuron input
+        E = m.embed.weight
+        drive = (E - E.mean(0)) @ W_in[:, index]
+        reads = dec(drive.topk(k).indices)
+    return dict(layer=layer, index=index, reads=reads, promotes=dec(hi.indices), suppresses=dec(lo.indices),
                 promote_logits=r(hi.values, 2), suppress_logits=r(-lo.values, 2), out_norm=r(float(w_out.norm())),
                 logit_kurtosis=r(float(((logit - logit.mean()) ** 4).mean() / (logit.var() ** 2 + 1e-12)), 1))
 

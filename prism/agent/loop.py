@@ -36,7 +36,9 @@ then test it with interventions before believing it. Attribution scores are hypo
 scores can have the wrong sign when attention saturates, and ablating one component is often compensated by backup \
 components. Treat a claim as established only when an intervention moves the metric the way the claim predicts, and \
 say so when it does not. Direct logit attribution only sees components that write the answer themselves; heads \
-that act upstream show up in head patching and not in direct attribution, so compare the two. Neuronpedia explanations are auto-generated labels and can be wrong; check them against what \
+that act upstream show up in head patching and not in direct attribution, so compare the two. When a corrupted \
+prompt is given the sweep also discovers a circuit: edges between components with a faithfulness score. Read the \
+faithfulness number before trusting the circuit, since a circuit that keeps little of the behaviour is incomplete. Neuronpedia explanations are auto-generated labels and can be wrong; check them against what \
 the feature does on this prompt. Record each conclusion with record_finding as you reach it, including negative \
 results, and state your confidence.
 
@@ -180,7 +182,7 @@ def build_tools(inv: Investigation) -> list:
         """Return the full data for one section of the current sweep when the summary is not enough.
 
         Args:
-            name: One of predictions, logit_lens, input_attribution, dla, attention, patching, head_patching, features, verification.
+            name: One of predictions, logit_lens, input_attribution, dla, attention, patching, head_patching, circuit, features, verification.
         """
         return safe("get_section", dict(name=name), lambda: inv.section(name))
 
@@ -290,11 +292,11 @@ def has_llm() -> bool:
 
 
 def investigate(question: str, ws: Workspace, model: str = "gpt2", on_step=None, max_iterations: int = 30,
-                llm: str = MODEL, effort: str = "high", review: bool = True) -> dict:
+                llm: str = MODEL, effort: str = "high", review: bool = True, client=None) -> dict:
     """Run an LLM-driven investigation. Returns report, findings, steps, bundle."""
     import anthropic
     inv = Investigation(ws, model, on_step)
-    client = anthropic.Anthropic()
+    client = client or anthropic.Anthropic()
     info = ws.model(model).info()
     runner = client.beta.messages.tool_runner(
         model=llm, max_tokens=16000, system=SYSTEM, tools=build_tools(inv), max_iterations=max_iterations,
@@ -384,6 +386,16 @@ def investigate_offline(prompt: str, ws: Workspace, model: str = "gpt2", target=
                       ", ".join(f"{l}.{h}" + (f" ({roles[(l, h)].replace('_', '-')} head)" if (l, h) in roles else "") for _, l, h in ups) + ".",
                 evidence="Exact head patching restores " + ", ".join(f"{v:+.2f}" for v, _, _ in ups) +
                          " of the metric gap respectively; none is among the top six direct writers.", confidence="high"))
+    circ = b.get("circuit") or {}
+    if "edges" in circ:
+        f = circ["faithfulness"]
+        inner = sorted((e for e in circ["edges"] if e["src"] != "emb" and e["dst"] != "out"), key=lambda e: -abs(e["weight"]))[:4]
+        last = f["curve"][-1] if f["curve"] else dict(size=0, circuit=0, random_mean=0)
+        inv.findings.append(dict(
+            claim=f"A {f['circuit_nodes']}-component circuit carries {100 * f['value']:.0f}% of the behaviour; the top {last['size']} components carry {100 * last['circuit']:.0f}%.",
+            evidence="Kept components run on clean inputs, all others take corrupted-run values. Random sets of the same size keep "
+                     f"{100 * last['random_mean']:.0f}%. Strongest internal edges: " + ", ".join(f"{e['src']}→{e['dst']} ({e['weight']:+.2f})" for e in inner) + ".",
+            confidence="high" if f["value"] > 0.6 else "medium"))
     top = next((L["features"][0] for L in (b.get("features") or {}).get("layers", [])[::-1] if L["features"]), None)
     if top:
         args = dict(kind="feature", layer=top["layer"], index=top["index"], values=[0, 0.5, 1, 2, 4], pos=top["pos"])

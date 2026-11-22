@@ -116,3 +116,55 @@ def test_store_and_jobs(tmp_path):
             break
         time.sleep(0.02)
     assert jobs.get(jid)["result"] == dict(ok=True) and "ZeroDivisionError" in jobs.get(bad)["error"]
+
+
+def test_circuit_discovery(model):
+    from prism.circuit import corpus_circuit, discover_circuit, edge_attribution, faithfulness
+    t = M.make_task(model, "hello world", "a", "b")
+    cor = model.encode("jello world")
+    ea = edge_attribution(model, t, cor, steps=2)
+    S, L, H = ea["scores"], model.n_layers, model.n_heads
+    assert S.shape == (1 + L * H + L, L * H + L + 1) and ea["sequential"]
+    up, dn = ea["up"], ea["down"]
+    assert float(S[up.index("a2.0"), dn.index("a1.0")]) == 0          # no edge backwards in depth
+    assert float(S[up.index("a1.0"), dn.index("a1.1")]) == 0          # nor within a layer of heads
+    assert float(S[up.index("m2"), dn.index("a2.0")]) == 0            # an MLP does not feed its own layer's heads
+    assert float(S[up.index("a1.0"), dn.index("m1")]) != 0            # but a head feeds its own layer's MLP
+    everything = set(up[1:])
+    assert abs(faithfulness(model, t, cor, everything) - 1) < 1e-4 and abs(faithfulness(model, t, cor, set())) < 1e-4
+    c = discover_circuit(model, t, cor, n_edges=20, steps=2, sizes=(2, 6), n_random=2)
+    ids = {n["id"] for n in c["nodes"]}
+    assert all(e["src"] in ids and e["dst"] in ids for e in c["edges"])
+    reach = {"emb"}
+    for _ in range(20):
+        reach |= {e["dst"] for e in c["edges"] if e["src"] in reach}
+    assert "out" in reach and ids <= reach                            # every kept node is reachable from the input
+    json.dumps(c)
+    cc = corpus_circuit(model, [(t, cor), (M.make_task(model, "hello there", "a", "b"), model.encode("jello there"))],
+                        n_edges=20, steps=2, sizes=(4,), n_random=1)
+    assert cc["n_prompts"] == 2 and "pos" not in cc["edges"][0] and 0 <= cc["edges"][0]["sign_agreement"] <= 1
+
+
+def test_edge_scores_sum_to_node_effect(model):
+    """Completeness: summing all edges into the output over upstream nodes recovers the metric gap
+    (the output's input is linear in upstream outputs up to the final norm, which IG integrates)."""
+    from prism.circuit import edge_attribution
+    t = M.make_task(model, "hello world", "a", "b")
+    ea = edge_attribution(model, t, model.encode("jello world"), steps=24)
+    total = float(ea["scores"][:, ea["down"].index("out")].sum())
+    assert abs(total - 1) < 0.1, total
+
+
+def test_circuit_scoring():
+    from prism.evals import score_circuit
+    circ = dict(nodes=[dict(id=i, kind="head") for i in ("a5.5", "a8.6", "a9.9", "a1.1")],
+                edges=[dict(src="a5.5", dst="a8.6"), dict(src="a8.6", dst="a9.9"), dict(src="a9.9", dst="out"),
+                       dict(src="a9.9", dst="a8.6"), dict(src="a1.1", dst="a9.9")])
+    s = score_circuit("ioi", circ)
+    assert s["circuit_heads"] == 4 and s["head_precision"] == 0.75
+    assert s["edges_between_reference_heads"] == 4 and s["edges_matching_paper_wiring"] == 3 and s["edges_unexplained"] == 1
+
+
+def test_neuron_reads_tokens(model):
+    prof = M.neuron_profile(model, 0, 1)
+    assert prof["reads"] and len(prof["reads"]) == 8

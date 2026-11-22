@@ -20,10 +20,11 @@ fine-tuning; and **black-box attribution** for models that are only reachable th
 | White-box backend | Hooks any Hugging Face causal LM by structure (GPT-2, Llama, Gemma, Qwen, Mistral, Pythia …): residual stream, per-head outputs, MLP neurons; patch / ablate / steer at any site | `prism/backend.py` |
 | Attribution | Logit lens · integrated gradients · gradient×input · direct logit attribution (layers, heads, neurons) · activation patching · attribution patching · exact per-head patching · attention patterns · dose-response sweeps · weight-level neuron profiles | `prism/methods.py` |
 | Features | SAE encoding, exact per-feature ablation effects, IG feature attribution, a token→feature→feature→output attribution graph; feature ids match Neuronpedia | `prism/sae.py`, `prism/neuronpedia.py` |
+| Circuit discovery | Edge attribution patching with integrated gradients over every input → head → MLP → output edge, pruned to paths from input to output, with a faithfulness test against random component sets; per prompt or averaged over a task | `prism/circuit.py` |
 | Model atlas | Prompt-independent head roles (previous-token, duplicate-token, induction) measured on repeated random tokens | `prism/atlas.py` |
 | Concept directions | Difference-of-means directions from contrasting prompts, scored per layer on held-out pairs, matched to SAE features, tested by steering; needs no SAE | `prism/probe.py` |
 | Corpus sweeps | The analysis over many prompts with mean, spread and sign agreement per head, and recurring features | `prism/corpus.py` |
-| Benchmark | Recall against published circuits (indirect object identification) for the pipeline or for an agent's written report | `prism/evals.py` |
+| Benchmark | Scores heads, discovered circuits (nodes and wiring) and written agent reports against the published indirect-object circuit | `prism/evals.py` |
 | Verification | Every sweep ablates its own top components and reports predicted vs. measured effect | `prism/workspace.py` |
 | Model diffing | Weight deltas with rank structure, per-layer representation drift, output KL, SAE-feature gains and losses; a fine-tune tracer that diffs every training phase; BatchTopK crosscoders trained on both checkpoints at once; trace diff for agent runs | `prism/diff.py`, `prism/training.py`, `prism/crosscoder.py` |
 | Semi-open models | Occlusion and counterfactual attribution for OpenAI (log-probabilities) and Anthropic (sampled answers), plus agreement scoring against an open surrogate | `prism/blackbox.py` |
@@ -78,6 +79,8 @@ Server settings (environment variables): `PRISM_MODELS` (allowed model ids, defa
   ablating one head is often compensated by others. That is why features are ranked by *exact ablation
   effect* and why each sweep includes a predicted-vs-measured table. In the indirect-object example, heads
   9.6 and 9.9 write most strongly toward the answer yet ablating either barely changes it.
+- **A circuit is only as good as its faithfulness.** Every discovered circuit reports how much of the behaviour
+  survives when everything outside it is corrupted, next to random component sets of the same size.
 - **Direct attribution only sees the last step.** Heads that act through other heads (S-inhibition, induction,
   duplicate-token) are invisible to it and show up in exact head patching instead; compare the two views.
 - **One prompt is an anecdote.** The corpus sweep reports how consistently each head matters across prompts.
@@ -87,8 +90,9 @@ Server settings (environment variables): `PRISM_MODELS` (allowed model ids, defa
   layer; positions where the SAE reconstructs poorly are masked.
 - **Graph edges are total effects** through the real model (gradient × activation), not direct effects in a
   replacement model as in transcoder-based circuit tracing.
-- **Integrated gradients uses a zero-embedding baseline.** The completeness error is reported with every
-  result; it is small on LayerNorm models and can be large on RMSNorm models, where the baseline is degenerate.
+- **Integrated gradients is checked, not assumed.** The baseline is the mean token embedding and the step count
+  adapts; the remaining completeness error is reported. It is under 5% on GPT-2 and Pythia but still large on
+  Qwen (RMSNorm), where the sweep says so and points to occlusion instead.
 - **Neuronpedia labels are auto-generated** and can be wrong for a given prompt.
 - **Black-box scores on Anthropic models** are answer frequencies over a handful of samples; differences
   below 1/n are noise.
@@ -96,7 +100,7 @@ Server settings (environment variables): `PRISM_MODELS` (allowed model ids, defa
 ## Development
 
 ```bash
-pytest -q                          # 25 tests on tiny random GPT-2 and Llama models, no network needed
+pytest -q                          # 30 tests on tiny random GPT-2 and Llama models, including the Claude-planned agent loop against a scripted transport, no network needed
 python scripts/build_demo.py       # regenerate web/bundles/ (downloads models, SAEs and WikiText-2; needs pyarrow)
 python scripts/build_static.py     # dist/ static site
 ```

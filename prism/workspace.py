@@ -60,7 +60,7 @@ class Workspace:
 
     # ----------------------------------------------------------------- sweep
     def sweep(self, prompt: str, model: str = "gpt2", target: Optional[str] = None, contrast: Optional[str] = None,
-              corrupt: Optional[str] = None, sae_layers: Optional[list] = None, verify: bool = True,
+              corrupt: Optional[str] = None, sae_layers: Optional[list] = None, verify: bool = True, circuit: bool = True,
               progress=None) -> dict:
         """Run every white-box method on one prompt and return one bundle."""
         say = progress or (lambda *_: None)
@@ -82,7 +82,7 @@ class Workspace:
             stage("dla", lambda: M.direct_logit_attribution(m, task))
             for n in b["dla"]["neurons"][:8]:               # weight-level reading of the top neurons
                 prof = M.neuron_profile(m, n["layer"], n["index"], k=6)
-                n.update(promotes=prof["promotes"], suppresses=prof["suppresses"])
+                n.update(reads=prof["reads"], promotes=prof["promotes"], suppresses=prof["suppresses"])
             top_heads = sorted(((abs(v), l, h) for l, row in enumerate(b["dla"]["heads"]) for h, v in enumerate(row)), reverse=True)[:6]
             try:
                 stage("attention", lambda: [dict(a, dla=b["dla"]["heads"][a["layer"]][a["head"]])
@@ -94,6 +94,9 @@ class Workspace:
                 if cids.shape == task.ids.shape:
                     stage("patching", lambda: M.activation_patching(m, task, cids))
                     stage("head_patching", lambda: M.head_patching(m, task, cids))
+                    if circuit:
+                        from .circuit import discover_circuit
+                        stage("circuit", lambda: discover_circuit(m, task, cids, steps=3, n_random=3))
                 else:
                     b["patching"] = dict(error=f"corrupted prompt has {cids.shape[1]} tokens, clean has {task.ids.shape[1]}; "
                                                "they must match for position-wise patching")
@@ -158,7 +161,9 @@ def summarize(b: dict) -> list:
     order = sorted(range(len(ig)), key=lambda i: -abs(ig[i]))[:3]
     out.append(dict(title="Input tokens that matter", evidence="input_attribution",
                     text="Integrated gradients: " + ", ".join(f"{toks[i]!r} ({ig[i]:+.2f})" for i in order) +
-                         f". Completeness error {b['input_attribution']['ig_completeness_error']:+.2f}."))
+                         f". Completeness error {b['input_attribution']['ig_completeness_error']:+.2f}" +
+                         (f" ({100 * b['input_attribution']['ig_relative_error']:.0f}% of the gap to the baseline: treat these token scores as rough; "
+                          "occlusion in the Black-box tab is the safer reading for this model)." if b["input_attribution"].get("ig_relative_error", 0) > 0.2 else ".")))
     d = b["dla"]
     H = [(v, l, h) for l, row in enumerate(d["heads"]) for h, v in enumerate(row)]
     pos, neg = sorted(H, reverse=True)[:3], sorted(H)[:2]
@@ -193,6 +198,18 @@ def summarize(b: dict) -> list:
                         text=f"Restoring the clean residual stream recovers >50% of the metric at: {desc or 'no single site'}. "
                              f"Gradient approximation (attribution patching) correlates r={b['patching']['approx_correlation']:.2f} "
                              "with the exact result."))
+    if "edges" in (b.get("circuit") or {}):
+        c = b["circuit"]
+        strongest = sorted((e for e in c["edges"] if e["src"] != "emb" and e["dst"] != "out"), key=lambda e: -abs(e["weight"]))[:5]
+        f = c["faithfulness"]
+        big = f["curve"][-1] if f["curve"] else None
+        out.append(dict(title="Circuit (who talks to whom)", evidence="circuit",
+                        text=f"Edge attribution finds {len(c['edges'])} edges on paths from the input to the output through "
+                             f"{f['circuit_nodes']} of {c['n_components']} components. Strongest internal edges: " +
+                             ", ".join(f"{e['src'][1:] if e['src'][0] == 'a' else e['src']}→{e['dst'][1:] if e['dst'][0] == 'a' else e['dst']} ({e['weight']:+.2f})" for e in strongest) +
+                             f". Faithfulness: with only those components on clean inputs and everything else corrupted, {100 * f['value']:.0f}% of the behaviour survives" +
+                             (f"; the top {big['size']} components keep {100 * big['circuit']:.0f}% versus {100 * big['random_mean']:.0f}% for random sets of that size." if big else ".") +
+                             (" Random sets do nearly as well here, so this test does not single out the circuit for this prompt." if big and big["random_mean"] > 0.3 else "")))
     for L in (b.get("features") or {}).get("layers", []):
         fs = L["features"][:3]
         out.append(dict(title=f"SAE features, layer {L['layer']}", evidence="features",

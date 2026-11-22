@@ -10,7 +10,7 @@ from prism.training import trace_finetune                 # noqa: E402
 from prism.atlas import atlas                             # noqa: E402
 from prism.corpus import corpus_sweep, ioi_dataset        # noqa: E402
 from prism.crosscoder import crosscoder_diff              # noqa: E402
-from prism.evals import score_grids                       # noqa: E402
+from prism.evals import score_circuit, score_grids                       # noqa: E402
 from prism.probe import concept_direction                 # noqa: E402
 from prism.workspace import Workspace                     # noqa: E402
 
@@ -56,11 +56,20 @@ b["blackbox"] = dict(occlusion(LocalScorer(ws.model(PY), kw["target"], kw["contr
                      access="open-weights (as black box)", target=kw["target"])
 save("ioi-pythia", "Same task on Pythia-70m (second model)", "sweep", b)
 
-# ---- atlas: prompt-independent head roles for both models
-save("atlas", "Head roles", "atlas", dict(kind="atlas", models=[atlas(m), atlas(ws.model(PY))]))
+# ---- third architecture, no SAE: everything except the feature views still applies
+QW = "Qwen/Qwen2.5-0.5B"
+ws.max_models = 3
+res = investigate_offline(ws=ws, model=QW, **kw)
+b = res.pop("bundle"); b["agent"] = res; b["request"] = dict(kw, model=QW)
+save("ioi-qwen", "Same task on Qwen2.5-0.5B (no SAE needed)", "sweep", b)
+
+# ---- atlas: prompt-independent head roles for all three models
+save("atlas", "Head roles", "atlas", dict(kind="atlas", models=[atlas(m), atlas(ws.model(PY)), atlas(ws.model(QW))]))
+ws.models.pop(QW, None)
 
 # ---- corpus sweep + benchmark against the published IOI circuit
-cs = corpus_sweep(ws, ioi_dataset(24), name="Indirect object identification, 24 prompts")
+cs = corpus_sweep(ws, ioi_dataset(24), name="Indirect object identification, 24 prompts", circuit_prompts=12)
+cs["circuit_benchmark"] = score_circuit("ioi", cs["circuit"])
 cs["benchmark"] = score_grids("ioi", cs["dla"]["mean"], cs["patching"]["mean"])
 save("corpus", "Corpus sweep: indirect object, 24 prompts", "corpus", cs)
 

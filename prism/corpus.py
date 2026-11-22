@@ -38,7 +38,7 @@ def ioi_dataset(n: int = 32, seed: int = 0) -> list:
 
 
 def corpus_sweep(ws, items: list, model: str = "gpt2", sae_layers: Optional[list] = None, features_k: int = 8,
-                 progress=None, name: str = "corpus") -> dict:
+                 progress=None, name: str = "corpus", circuit_prompts: int = 0) -> dict:
     m = ws.model(model)
     layers = ws.default_sae_layers(model) if sae_layers is None else sae_layers
     saes = [ws.sae(model, l) for l in layers]
@@ -66,6 +66,16 @@ def corpus_sweep(ws, items: list, model: str = "gpt2", sae_layers: Optional[list
                     for f in L["features"]:
                         e = feats[(f["layer"], f["index"])]
                         e["prompts"].add(i); e["n"] += 1; e["effect"] += f["effect"]; e["tokens"][f["token"]] += 1
+        circ = None
+        if circuit_prompts:
+            from .circuit import corpus_circuit
+            pairs = []
+            for it in items:
+                task = M.make_task(m, it["prompt"], it.get("target"), it.get("contrast"))
+                if it.get("corrupt") and m.encode(it["corrupt"]).shape == task.ids.shape:
+                    pairs.append((task, m.encode(it["corrupt"])))
+            if pairs:
+                circ = corpus_circuit(m, pairs[:circuit_prompts], n_random=3)
     D = torch.stack(dla)
 
     def stats(X):
@@ -75,6 +85,8 @@ def corpus_sweep(ws, items: list, model: str = "gpt2", sae_layers: Optional[list
     out = dict(kind="corpus", name=name, model=m.info(), n=len(items), examples=[it["prompt"] for it in items[:4]],
                metric_mean=r(sum(metrics) / len(metrics)), accuracy=r(sum(x > 0 for x in metrics) / len(metrics), 3),
                answer_layer_mean=r(sum(answer_layer) / len(answer_layer), 2), dla=stats(D), patch_skipped=skipped)
+    if circ:
+        out["circuit"] = circ
     if patch:
         out["patching"] = stats(torch.stack(patch))
         out["patching"]["n"] = len(patch)

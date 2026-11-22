@@ -20,6 +20,11 @@
   "kind": "sweep"
  },
  {
+  "id": "ioi-qwen",
+  "title": "Same task on Qwen2.5-0.5B (no SAE needed)",
+  "kind": "sweep"
+ },
+ {
   "id": "atlas",
   "title": "Head roles",
   "kind": "atlas"

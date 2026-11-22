@@ -38,6 +38,26 @@ Exit test (met): on 24 indirect-object prompts the pipeline finds all five answe
 direct attribution, and head patching recovers three of the four S-inhibition heads and both induction heads (60% of all upstream heads). The atlas independently labels 5.5 and 6.9 as
 induction heads and 4.11 as a previous-token head, matching the literature.
 
+## Phase 0.75 — Circuits and a third architecture (done)
+
+- **Automated circuit discovery** (`prism/circuit.py`): edge attribution patching with integrated gradients over
+  every input → head → MLP → output edge, pruned to paths from input to output, per prompt or averaged over a task.
+- **Faithfulness as a first-class output**: every circuit reports how much behaviour survives when everything
+  outside it is corrupted, next to random component sets of the same size.
+- **Circuit benchmark**: discovered nodes and wiring scored against the published indirect-object circuit.
+- **Qwen2.5-0.5B** (24 layers, RMSNorm, 494M parameters) runs the full pipeline with no SAE.
+- **Integrated gradients fixed**: mean-embedding baseline and adaptive steps, after the Qwen run showed the zero
+  baseline was badly off.
+- **Agent loop tested end to end** through the real SDK against a scripted transport.
+- **Neuron weight readings from input to output** (which tokens a neuron reads, which it promotes).
+
+Exit test (met): averaged over 12 indirect-object prompts on GPT-2 small, the discovered circuit contains 11 of the
+paper's 15 heads; 19 of its 28 edges between reference heads follow the paper's wiring (6 more connect name movers,
+3 are not in the paper); its top 32 of 156 components keep 89% of the behaviour, against 2% for random sets.
+
+Known weak spots, measured: on Qwen the top 32 of 360 components keep only 35%, and integrated gradients still
+misses its completeness check there; on Pythia-70m the faithfulness test does not discriminate (random sets keep 53%).
+
 ## Phase 1 — Model coverage
 
 | Work | Why | Exit test |

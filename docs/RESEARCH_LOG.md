@@ -3,6 +3,21 @@
 A running survey of interpretability tooling, newest first. Each entry says what was found, what it means
 for Prism, and what (if anything) was done about it. Entries are added by the scheduled research session.
 
+## 2026-11-22 — circuits (no new survey; built from methods already in the literature)
+
+| Method | Source | Implemented as | Measured |
+|---|---|---|---|
+| Edge attribution patching | Syed et al. 2023 | `prism/circuit.py:edge_attribution` | Edges into the output sum to the metric gap within 10% (tested). |
+| EAP with integrated gradients | Hanna et al. 2024 | Same, `steps` parameter | 12-prompt IOI circuit: 11 of 15 reference heads, top 32 components keep 89% of behaviour vs 2% random. |
+| Circuit faithfulness by corrupted-activation patching | Wang et al. 2022; Conmy et al. 2023 (ACDC) | `prism/circuit.py:faithfulness` | Weak on Qwen2.5-0.5B (35% at 32 of 360 components) and uninformative on Pythia-70m (random sets keep 53%). |
+| Copy suppression | McDougall et al. 2023 | Used to classify name-mover → negative-name-mover edges in `prism/evals.py` | 6 such edges found; counted separately from the 2022 wiring. |
+
+Sources here are cited from memory of the published papers, not re-fetched this cycle.
+
+Operational note: the first scheduled research run (Nov 21) completed its work but could not push, because its
+fresh session had no access to this repository; its changes were lost. The cycle now runs in the session that owns
+the pull request.
+
 ## 2026-11-19 — baseline survey
 
 | Finding | Source | Relevance | Action |

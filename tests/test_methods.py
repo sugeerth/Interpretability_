@@ -37,8 +37,9 @@ def test_dla_is_exact(model):
 
 
 def test_integrated_gradients_completeness(model):
-    ia = M.input_attribution(model, task(model), steps=64)
-    assert abs(ia["ig_completeness_error"]) < 0.05 * (abs(ia["metric"] - ia["baseline_metric"]) + 1)
+    ia = M.input_attribution(model, task(model))
+    assert ia["ig_relative_error"] <= 0.05 and ia["baseline"] == "mean token embedding"
+    assert abs(sum(ia["integrated_gradients"]) - (ia["metric"] - ia["baseline_metric"]) - ia["ig_completeness_error"]) < 1e-2
 
 
 def test_patching_endpoints(model):
