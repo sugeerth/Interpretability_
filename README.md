@@ -32,7 +32,7 @@ fine-tuning; and **black-box attribution** for models that are only reachable th
 | Model diffing | Weight deltas with rank structure, per-layer representation drift, output KL, SAE-feature gains and losses; a fine-tune tracer that diffs every training phase; BatchTopK crosscoders trained on both checkpoints at once; trace diff for agent runs | `prism/diff.py`, `prism/training.py`, `prism/crosscoder.py` |
 | Semi-open models | Occlusion and counterfactual attribution for OpenAI (log-probabilities) and Anthropic (sampled answers), plus agreement scoring against an open surrogate | `prism/blackbox.py` |
 | Agent | Claude drives ten tools in a hypothesis → experiment → causal-check loop, then a separate reviewer pass tries to falsify the report against the experiment log; a fixed offline protocol runs with no API key | `prism/agent/loop.py` |
-| Web app + API | Single-page app (Trace, Circuit, Atlas, Concepts, Training diff, Black-box, Agent) served by FastAPI; stored results with shareable links; background jobs; also builds as a static site | `web/`, `prism/server/app.py`, `prism/store.py` |
+| Web app + API | Single-page app: a model map (every head and MLP by layer, circuit edges, attention on click, an animated walk through the layers), Trace, Circuit, Compare (runs side by side on normalised depth), Atlas, Concepts, Training diff, Black-box, Agent; served by FastAPI; stored results with shareable links; background jobs; also builds as a static site | `web/`, `prism/server/app.py`, `prism/store.py` |
 
 ## Quick start
 

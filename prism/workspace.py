@@ -88,6 +88,7 @@ class Workspace:
             try:
                 stage("attention", lambda: [dict(a, dla=b["dla"]["heads"][a["layer"]][a["head"]])
                                             for a in M.attention_patterns(m, task, [(l, h) for _, l, h in top_heads])])
+                stage("attention_last", lambda: M.attention_last(m, task))
             except RuntimeError as e:
                 b["attention"] = dict(error=str(e))
             if corrupt:

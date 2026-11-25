@@ -333,6 +333,12 @@ def attention_patterns(m: WhiteBoxModel, task: Task, heads: list) -> list:
     return out
 
 
+def attention_last(m: WhiteBoxModel, task: Task) -> list:
+    """Attention from the final position for every head: [layer][head][position]."""
+    c = m.forward(task.ids, cache=["attn"])
+    return [r(a[0, :, -1], 2) for a in c.attn]
+
+
 # ---------------------------------------------------- weight-level profiles
 def neuron_profile(m: WhiteBoxModel, layer: int, index: int, k: int = 8) -> dict:
     """What a neuron does according to the weights alone, input to output:

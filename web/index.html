@@ -41,6 +41,13 @@ form.run{display:grid;gap:10px;grid-template-columns:minmax(0,1fr)}
 @media(min-width:760px){form.run{grid-template-columns:minmax(0,3fr) minmax(0,1fr) minmax(0,1fr) auto;align-items:end}.run .wide{grid-column:1/4}}
 textarea{min-height:110px;resize:vertical;line-height:1.45}
 .feat[role=button]{cursor:pointer}.feat[role=button]:hover{border-color:var(--accent)}
+.mapgrid{grid-template-columns:minmax(0,1fr)} @media(min-width:1040px){.mapgrid{grid-template-columns:minmax(0,auto) minmax(260px,1fr);align-items:start}}
+svg .sel{stroke:var(--accent)!important;stroke-width:2.4px!important}
+svg [data-node]:focus{outline:none}
+svg [data-node]:focus-visible{stroke:var(--accent);stroke-width:2.4px}
+@keyframes flow{to{stroke-dashoffset:-24}}
+@media (prefers-reduced-motion:no-preference){svg path.flow{stroke-dasharray:7 5;animation:flow .7s linear infinite}}
+@media (prefers-reduced-motion:no-preference){svg path{transition:stroke-opacity .18s} svg [data-band]{transition:fill-opacity .25s}}
 .kv{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12.5px}.kv b{font:600 15px var(--font-display);display:block}
 .chips{display:flex;flex-wrap:wrap;gap:4px}.chips span{font:11.5px var(--font-mono);background:var(--cell);border-radius:4px;padding:1px 6px;white-space:pre}
 label{display:flex;flex-direction:column;gap:3px;font-size:11.5px;color:var(--muted);font-weight:500;min-width:0}
@@ -89,11 +96,11 @@ svg text{font-family:var(--font-mono);fill:var(--ink)} svg .mut{fill:var(--muted
 
 <div class="wrap">
   <header>
-    <h1>Prism <small>input → neurons → features → output, on one scale</small></h1>
+    <h1>Prism <small>see inside a language model: input → heads and neurons → features → output</small></h1>
     <div class="status"><span class="dot" id="dot"></span><span id="mode">loading…</span></div>
   </header>
   <nav id="nav">
-    <a href="#trace">Trace</a><a href="#circuit">Circuit</a><a href="#atlas">Atlas</a><a href="#concepts">Concepts</a><a href="#training">Training diff</a><a href="#blackbox">Black-box</a><a href="#agent">Agent</a>
+    <a href="#map">Map</a><a href="#trace">Trace</a><a href="#circuit">Circuit</a><a href="#compare">Compare</a><a href="#atlas">Atlas</a><a href="#concepts">Concepts</a><a href="#training">Training diff</a><a href="#blackbox">Black-box</a><a href="#agent">Agent</a>
   </nav>
 
   <section class="panel" id="runpanel">
@@ -634,24 +641,178 @@ async function runAgent(ev) {
 }
 
 /* ------------------------------------------------------------------ shell */
+/* ------------------------------------------------------------- model map */
+function atlasFor(b) { return S.atlas && S.atlas.models.find(m => m.model.name === b.model.name); }
+function roleOf(b, l, h) {
+  const A = atlasFor(b); if (!A) return null; let best = null;
+  for (const [k, g] of Object.entries(A.roles.scores)) { const v = g[l] && g[l][h]; if (v > 0.6 && (!best || v > best[1])) best = [k, v]; }
+  return best && { role: best[0].replace(/_/g, "-"), score: best[1] };
+}
+function viewMap(b) {
+  const L = b.model.n_layers, H = b.model.n_heads, T = b.tokens.length, NS = "http://www.w3.org/2000/svg";
+  const mk = (tag, a, txt) => { const n = document.createElementNS(NS, tag); for (const k in a) if (a[k] !== null && a[k] !== undefined) n.setAttribute(k, a[k]); if (txt !== undefined) n.textContent = txt; return n; };
+  const hp = b.head_patching && b.head_patching.heads, mode = (S.mapMode === "patch" && hp) ? "patch" : "dla", grid = mode === "patch" ? hp : b.dla.heads;
+  const circ = b.circuit && b.circuit.edges ? b.circuit : null, inCirc = new Set(circ ? circ.nodes.map(n => n.id) : []);
+  const rh = Math.max(20, Math.min(40, 470 / L)), cw = Math.max(20, Math.min(46, 560 / (H + 1))), x0 = 52, y0 = 96;
+  const headsW = cw * H, mlpX = x0 + headsW + cw * 0.75, lensX = mlpX + cw * 0.75 + 16, W = lensX + 190, yTok = y0 + rh * L + 34, Hh = yTok + 70;
+  const yL = l => y0 + (L - 1 - l) * rh + rh / 2, xH = h => x0 + cw * (h + 0.5), xT = t => x0 + (mlpX + 18 - x0) * (t + 0.5) / T;
+  const svg = mk("svg", { viewBox: `0 0 ${W} ${Hh}`, width: W, height: Hh, role: "img", "aria-label": "Model map: input tokens at the bottom, attention heads and MLPs by layer, output on top" });
+  const mxG = maxAbs(grid), mxD = maxAbs(b.dla.heads), mxM = maxAbs([b.dla.mlp, b.dla.attn]), ig = b.input_attribution.integrated_gradients, mxI = maxAbs(ig);
+  const imp = (l, h) => Math.max(Math.abs(b.dla.heads[l][h]) / mxD, hp && hp[l][h] !== null ? Math.abs(hp[l][h]) / maxAbs(hp) : 0);
+  const pos = { out: [x0 + headsW / 2, 44] };
+  for (let l = 0; l < L; l++) { for (let h = 0; h < H; h++) pos[`a${l}.${h}`] = [xH(h), yL(l)]; pos["m" + l] = [mlpX, yL(l)]; }
+  const gBack = mk("g", {}), gEdge = mk("g", {}), gArc = mk("g", {}), gNode = mk("g", {}), gTop = mk("g", {});
+  // layer bands + labels + residual read-out
+  const lens = b.logit_lens;
+  for (let l = 0; l < L; l++) {
+    gBack.append(mk("rect", { x: x0 - 6, y: yL(l) - rh / 2 + 1, width: mlpX + cw * 0.5 - x0 + 12, height: rh - 2, rx: 4, fill: "var(--cell)", "fill-opacity": l % 2 ? 0.55 : 0.3, "data-band": l }));
+    gBack.append(mk("text", { x: x0 - 12, y: yL(l) + 3.5, "font-size": 10.5, "text-anchor": "end", class: "mut" }, "L" + l));
+    const p = lens.target_prob[l + 1], bw = 70;
+    gBack.append(mk("rect", { x: lensX, y: yL(l) - 5, width: bw, height: 10, rx: 2, fill: "var(--cell)" }), mk("rect", { x: lensX, y: yL(l) - 5, width: Math.max(0.5, bw * p), height: 10, rx: 2, fill: "var(--pos)" }),
+      mk("text", { x: lensX + bw + 8, y: yL(l) + 3.5, "font-size": 10.5 }, show(lens.top_token[l + 1]).slice(0, 12)));
+  }
+  gBack.append(mk("text", { x: lensX, y: y0 - 22, "font-size": 10, class: "mut" }, "after each layer:"), mk("text", { x: lensX, y: y0 - 9, "font-size": 10, class: "mut" }, "p(target) · decodes to"));
+  for (let h = 0; h < H; h += (H > 12 ? 2 : 1)) gBack.append(mk("text", { x: xH(h), y: y0 - 9, "font-size": 9.5, "text-anchor": "middle", class: "mut" }, "h" + h));
+  gBack.append(mk("text", { x: mlpX, y: y0 - 9, "font-size": 9.5, "text-anchor": "middle", class: "mut" }, "MLP"));
+  // tokens
+  b.tokens.forEach((t, i) => { pos["t" + i] = [xT(i), yTok];
+    const g = mk("g", { "data-pos": i }); g.append(mk("rect", { x: xT(i) - 4.5, y: yTok - 4.5, width: 9, height: 9, rx: 2, fill: tint(ig[i], mxI), stroke: "var(--ink)", "stroke-width": 0.7 }));
+    const tx = mk("text", { x: xT(i), y: yTok + 12, "font-size": 10.5, "text-anchor": "end", transform: `rotate(-38 ${xT(i)} ${yTok + 12})` }, show(t).slice(0, 10)); g.append(tx, mk("title", {}, `${show(t)} (position ${i}) · integrated gradients ${fmt(ig[i])}`)); gNode.append(g); });
+  gBack.append(mk("text", { x: x0 - 12, y: yTok + 3.5, "font-size": 10.5, "text-anchor": "end", class: "mut" }, "input"));
+  // circuit edges
+  const els = [];
+  if (circ) { const mxE = maxAbs(circ.edges.map(e => e.weight));
+    circ.edges.forEach(e => { const a = e.src === "emb" ? pos["t" + (e.pos !== undefined ? e.pos : T - 1)] : pos[e.src], c = pos[e.dst]; if (!a || !c) return;
+      const my = (a[1] + c[1]) / 2, p = mk("path", { d: `M${a[0]},${a[1]} C${a[0]},${my} ${c[0]},${my} ${c[0]},${c[1]}`, fill: "none", stroke: e.weight >= 0 ? "var(--pos)" : "var(--neg)", "stroke-width": (0.6 + 4.2 * Math.abs(e.weight) / mxE).toFixed(2), "stroke-opacity": 0.42, "stroke-linecap": "round" });
+      p.append(mk("title", {}, `${e.src} → ${e.dst}: ${fmt(e.weight, 3)}`)); gEdge.append(p); els.push([e, p]); }); }
+  // output
+  const pr = b.predictions; gTop.append(mk("rect", { x: pos.out[0] - 60, y: 30, width: 120, height: 26, rx: 13, fill: "var(--accent)" }), mk("text", { x: pos.out[0], y: 47, "font-size": 12, "text-anchor": "middle", style: "fill:var(--accent-ink);font-weight:500" }, `${show(pr.top[0].token)}  ${(100 * pr.top[0].prob).toFixed(0)}%`),
+    mk("text", { x: pos.out[0] + 70, y: 47, "font-size": 10.5, class: "mut" }, pr.top.slice(1, 4).map(t => `${show(t.token)} ${(100 * t.prob).toFixed(0)}%`).join("   ")), mk("text", { x: x0 - 12, y: 47, "font-size": 10.5, "text-anchor": "end", class: "mut" }, "output"));
+  // nodes
+  const info = el("div", { id: "mapinfo", style: "display:flex;flex-direction:column;gap:8px;min-width:0" });
+  const dim = id => { els.forEach(([e, p]) => p.setAttribute("stroke-opacity", !id ? 0.42 : (e.src === id || e.dst === id) ? 0.95 : 0.05)); };
+  const arcs = (l, h) => { gArc.replaceChildren(); const A = b.attention_last && b.attention_last[l] && b.attention_last[l][h]; if (!A) return;
+    A.forEach((w, t) => { if (w < 0.04) return; const [x1, y1] = pos[`a${l}.${h}`], [x2, y2] = pos["t" + t];
+      gArc.append(mk("path", { d: `M${x1},${y1} Q${(x1 + x2) / 2 + (x1 < x2 ? 30 : -30)},${(y1 + y2) / 2} ${x2},${y2 - 6}`, fill: "none", stroke: "var(--accent)", "stroke-width": (0.5 + 5 * w).toFixed(2), "stroke-opacity": 0.75, "stroke-dasharray": "1 0", "stroke-linecap": "round" })); }); };
+  const select = id => { S.mapSel = id; dim(id); gNode.querySelectorAll("[data-node]").forEach(n => n.classList.toggle("sel", n.getAttribute("data-node") === id));
+    if (!id) { gArc.replaceChildren(); info.replaceChildren(mapSummary(b, circ)); return; }
+    if (id[0] === "a") { const [l, h] = id.slice(1).split(".").map(Number); arcs(l, h); info.replaceChildren(headCard(b, l, h, circ)); } else { gArc.replaceChildren(); info.replaceChildren(mlpCard(b, Number(id.slice(1)), circ)); } };
+  for (let l = 0; l < L; l++) {
+    for (let h = 0; h < H; h++) { const v = grid[l][h], im = imp(l, h), id = `a${l}.${h}`, [cx, cy] = pos[id], rr = Math.min(cw, rh) * (0.16 + 0.3 * Math.sqrt(im));
+      const c = mk("circle", { cx, cy, r: rr.toFixed(1), fill: v === null ? "none" : tint(v, mxG), stroke: inCirc.has(id) ? "var(--ink)" : "var(--line)", "stroke-width": inCirc.has(id) ? 1.4 : 0.8, "stroke-dasharray": v === null ? "2 2" : null, tabindex: im > 0.12 || inCirc.has(id) ? 0 : null, "data-node": id, "data-layer": l, style: "cursor:pointer" });
+      c.append(mk("title", {}, `head ${l}.${h} · direct ${fmt(b.dla.heads[l][h], 3)}` + (hp && hp[l][h] !== null ? ` · patching ${fmt(hp[l][h], 3)}` : "")));
+      c.addEventListener("click", () => select(S.mapSel === id ? null : id)); c.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(S.mapSel === id ? null : id); } });
+      gNode.append(c);
+      if (im > 0.45) gTop.append(mk("text", { x: cx, y: cy + 3.2, "font-size": 9, "text-anchor": "middle", style: `pointer-events:none;fill:${ink(v || 0, mxG)}` }, h)); }
+    const mv = b.dla.mlp[l], id = "m" + l, s = Math.min(cw, rh) * (0.34 + 0.4 * Math.sqrt(Math.abs(mv) / mxM));
+    const rct = mk("rect", { x: mlpX - s / 2, y: yL(l) - s / 2, width: s, height: s, rx: 2, fill: tint(mv, mxM), stroke: inCirc.has(id) ? "var(--ink)" : "var(--line)", "stroke-width": inCirc.has(id) ? 1.4 : 0.8, tabindex: 0, "data-node": id, "data-layer": l, style: "cursor:pointer" });
+    rct.append(mk("title", {}, `MLP ${l} · direct ${fmt(mv, 3)}`)); rct.addEventListener("click", () => select(S.mapSel === id ? null : id)); rct.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(S.mapSel === id ? null : id); } }); gNode.append(rct);
+  }
+  svg.append(gBack, gEdge, gArc, gNode, gTop);
+  // play: walk the computation upward, layer by layer
+  const still = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const play = async btn => { if (S.mapPlaying) return; S.mapPlaying = true; btn.disabled = true; select(null);
+    for (let l = 0; l < L; l++) { if (!document.body.contains(svg)) break;
+      gBack.querySelectorAll("[data-band]").forEach(n => n.setAttribute("fill-opacity", Number(n.getAttribute("data-band")) === l ? 1 : 0.25));
+      els.forEach(([e, p]) => { const dl = e.dst === "out" ? L : Number(e.dst.slice(1).split(".")[0]); p.setAttribute("stroke-opacity", dl === l ? 0.95 : dl < l ? 0.3 : 0.04); p.classList.toggle("flow", dl === l); });
+      $("#mapstep").textContent = `Layer ${l}: residual stream now decodes to ${show(lens.top_token[l + 1])} · p(target) = ${(100 * lens.target_prob[l + 1]).toFixed(1)}%`;
+      await new Promise(r => setTimeout(r, Math.max(260, 5200 / L))); }
+    gBack.querySelectorAll("[data-band]").forEach(n => n.setAttribute("fill-opacity", Number(n.getAttribute("data-band")) % 2 ? 0.55 : 0.3)); els.forEach(([e, p]) => p.classList.remove("flow")); dim(null); $("#mapstep") && ($("#mapstep").textContent = ""); S.mapPlaying = false; btn.disabled = false; };
+  const head = el("div", { class: "phead" }, el("div", {}, el("h2", {}, `Model map · ${b.model.name.split("/").pop()}`), el("p", { class: "sub" }, "Read it bottom to top. Squares at the bottom are input tokens. Each circle is an attention head, each square on the right an MLP, sized by how much it matters and coloured by its effect on the answer. Lines are the discovered circuit. The column on the right is the model's running guess after each layer. Select any head to see where it looks.")),
+    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center" }, hp ? seg([["dla", "Colour: direct effect"], ["patch", "Colour: exact patching"]], mode, k => { S.mapMode = k; render(); }) : null, still ? null : el("button", { class: "ghost", type: "button", onclick: e => play(e.currentTarget) }, "▶ Play the computation")));
+  const out = el("div", { class: "grid" }, el("section", { class: "panel" }, head, el("div", { class: "grid mapgrid" }, el("div", { class: "scroll" }, svg), info), el("div", { id: "mapstep", class: "mono", style: "min-height:1.4em;font-size:12.5px;color:var(--accent)" }),
+    el("div", { class: "legend" }, "pushes against the answer", el("span", { class: "ramp" }), "pushes toward the answer", el("span", {}, "· dark outline = in the circuit"), b.head_patching && b.head_patching.measured < b.head_patching.total ? el("span", {}, "· dashed = not measured exactly") : null)),
+    findingsPanel(b));
+  setTimeout(() => select(S.mapSel && pos[S.mapSel] ? S.mapSel : null), 0);
+  return out;
+}
+function mapSummary(b, circ) {
+  const pr = b.predictions, f = circ && circ.faithfulness, ninety = f && (f.minimal || []).find(x => x.threshold === 0.9 && x.size);
+  const tops = b.dla.heads.flatMap((row, l) => row.map((v, h) => [v, l, h])).sort((a, c) => Math.abs(c[0]) - Math.abs(a[0])).slice(0, 5);
+  return el("div", { style: "display:flex;flex-direction:column;gap:10px" },
+    el("div", { class: "kv" }, el("span", {}, el("b", {}, fmt(pr.metric)), "metric"), el("span", {}, el("b", {}, `${b.model.n_layers} × ${b.model.n_heads}`), "layers × heads"), circ ? el("span", {}, el("b", {}, circ.edges.length), "circuit edges") : null, ninety ? el("span", {}, el("b", {}, `${ninety.size} of ${circ.n_components}`), "components keep 90%") : null),
+    el("div", {}, el("div", { class: "sub" }, "Strongest direct writers (select one on the map)"), el("div", { class: "chips" }, tops.map(([v, l, h]) => el("span", {}, `${l}.${h}  ${fmt(v)}`)))),
+    circ ? null : el("div", { class: "note" }, "No circuit lines: add a corrupted prompt to discover which components talk to each other."),
+    el("div", { class: "note" }, "Nothing selected. Select a head to draw its attention to the input tokens and list what it reads from and writes to."));
+}
+function edgeList(circ, id) {
+  if (!circ) return null; const lab = x => x === "emb" ? "tokens" : x === "out" ? "answer" : x[0] === "a" ? x.slice(1) : "MLP " + x.slice(1);
+  const ins = circ.edges.filter(e => e.dst === id).sort((a, c) => Math.abs(c.weight) - Math.abs(a.weight)).slice(0, 5), outs = circ.edges.filter(e => e.src === id).sort((a, c) => Math.abs(c.weight) - Math.abs(a.weight)).slice(0, 5);
+  if (!ins.length && !outs.length) return el("div", { class: "sub" }, "Not part of the discovered circuit.");
+  return el("div", {}, ins.length ? el("div", {}, el("div", { class: "sub" }, "Reads from"), el("div", { class: "chips" }, ins.map(e => el("span", { style: `color:var(${e.weight >= 0 ? "--pos" : "--neg"})` }, `${lab(e.src)} ${fmt(e.weight)}`)))) : null,
+    outs.length ? el("div", { style: "margin-top:6px" }, el("div", { class: "sub" }, "Writes to"), el("div", { class: "chips" }, outs.map(e => el("span", { style: `color:var(${e.weight >= 0 ? "--pos" : "--neg"})` }, `${lab(e.dst)} ${fmt(e.weight)}`)))) : null);
+}
+function headCard(b, l, h, circ) {
+  const hp = b.head_patching && b.head_patching.heads, role = roleOf(b, l, h), A = b.attention_last && b.attention_last[l] && b.attention_last[l][h];
+  const look = A ? A.map((w, t) => [w, t]).sort((a, c) => c[0] - a[0]).slice(0, 3) : [], ver = (b.verification || []).find(v => v.kind === "head" && v.layer === l && v.index === h);
+  const res = el("div", {});
+  return el("div", { style: "display:flex;flex-direction:column;gap:9px" },
+    el("div", { style: "display:flex;gap:8px;align-items:baseline;flex-wrap:wrap" }, el("h2", {}, `Head ${l}.${h}`), role ? el("span", { class: "pill high" }, `${role.role} head (${role.score.toFixed(2)})`) : null),
+    el("div", { class: "kv" }, el("span", {}, el("b", {}, fmt(b.dla.heads[l][h])), "direct effect on the answer"), hp && hp[l][h] !== null ? el("span", {}, el("b", {}, fmt(hp[l][h])), "of the gap restored by patching") : null, ver ? el("span", {}, el("b", {}, fmt(ver.measured)), "metric change when ablated") : null),
+    look.length ? el("div", {}, el("div", { class: "sub" }, "Looks at (from the last position)"), el("div", { class: "chips" }, look.map(([w, t]) => el("span", {}, `${show(b.tokens[t])}  ${(100 * w).toFixed(0)}%`)))) : null,
+    edgeList(circ, `a${l}.${h}`),
+    S.live ? el("div", {}, el("button", { class: "ghost", type: "button", onclick: async e => { e.currentTarget.disabled = true; res.textContent = "Ablating…";
+      try { const r = await getJSON("api/intervene", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...formReq(), kind: "head", layer: l, index: h, scale: 0 }) });
+        res.replaceChildren(el("div", { class: "note" }, `Ablated: metric ${fmt(r.metric_before)} → ${fmt(r.metric_after)}; top prediction becomes ${show(r.top_after[0].token)} (${(100 * r.top_after[0].prob).toFixed(0)}%).`)); } catch (err) { res.replaceChildren(el("div", { class: "err" }, err.message)); } } }, "Ablate this head"), res) : null);
+}
+function mlpCard(b, l, circ) {
+  const ns = b.dla.neurons.filter(n => n.layer === l).slice(0, 4), FL = b.features && b.features.layers.find(x => x.layer === l);
+  return el("div", { style: "display:flex;flex-direction:column;gap:9px" }, el("h2", {}, `MLP ${l}`),
+    el("div", { class: "kv" }, el("span", {}, el("b", {}, fmt(b.dla.mlp[l])), "direct effect on the answer"), el("span", {}, el("b", {}, fmt(b.dla.attn[l])), "all heads in this layer")),
+    edgeList(circ, "m" + l),
+    ns.length ? el("div", {}, el("div", { class: "sub" }, "Its strongest neurons, read from the weights"), ns.map(n => el("div", { style: "font-size:12.5px;margin-top:4px" }, el("b", { class: "mono" }, `#${n.index} ${fmt(n.dla)}`), n.reads ? [" reads ", el("span", { class: "mono" }, n.reads.slice(0, 3).map(show).join(" "))] : null, n.promotes ? [" → promotes ", el("span", { class: "mono" }, n.promotes.slice(0, 3).map(show).join(" "))] : null))) : el("div", { class: "sub" }, "None of the top-ranked neurons are in this layer."),
+    FL ? el("div", {}, el("div", { class: "sub" }, "Features entering this layer"), el("div", { class: "feats", style: "margin-top:4px" }, FL.features.slice(0, 3).map(f => el("div", { class: "feat" }, el("span", { class: "expl" }, f.explanation || "no label"), el("span", { class: "meta" }, `#${f.index} at ${show(f.token)}`), el("span", { class: "pill" }, fmt(f.effect)))))) : null);
+}
+
+/* --------------------------------------------------------------- compare */
+function resample(ys, n = 24) { return Array.from({ length: n }, (_, i) => { const x = i * (ys.length - 1) / (n - 1), a = Math.floor(x), c = Math.min(ys.length - 1, a + 1); return ys[a] + (ys[c] - ys[a]) * (x - a); }); }
+function viewCompare() {
+  const sweeps = S.index.filter(x => x.kind === "sweep"); if (sweeps.length < 2) return panel("Compare", "Needs at least two stored examples.");
+  S.cmp = S.cmp || [sweeps[0].id, (sweeps.find(x => /pythia/.test(x.id)) || sweeps[1]).id, (sweeps.find(x => /qwen/.test(x.id)) || {}).id].filter(Boolean);
+  const got = S.cmp.map(id => S.cache[id]); S.cmp.forEach(id => { if (!S.cache[id]) loadBundle(id).then(render).catch(() => {}); });
+  const cols = ["var(--accent)", "var(--pos)", "var(--neg)"], pickers = el("div", { style: "display:flex;gap:10px;flex-wrap:wrap" }, S.cmp.map((id, i) => el("label", { style: "flex:1 1 220px" }, el("span", { style: `color:${cols[i]}` }, "● " + ["First", "Second", "Third"][i]), el("select", { id: "cmp-" + i, onchange: e => { S.cmp[i] = e.target.value; render(); } }, sweeps.map(x => el("option", { value: x.id, ...(x.id === id ? { selected: "" } : {}) }, x.title))))));
+  const top = panel("Compare runs", "Put two or three runs side by side: the same prompt on different models, or different prompts on one model. Depth is normalised, so a 6-layer and a 24-layer model share an axis.", pickers);
+  if (got.some(x => !x)) return el("div", { class: "grid" }, top, panel("Loading", "Fetching the selected runs…"));
+  const name = b => b.model.name.split("/").pop(), depth = Array.from({ length: 24 }, (_, i) => i % 4 === 0 ? Math.round(100 * i / 23) + "%" : "");
+  const series = f => got.map((b, i) => ({ values: f(b), color: cols[i], width: 2 }));
+  const cum = b => { let s = b.dla.embed; const ys = [s]; for (let l = 0; l < b.model.n_layers; l++) { s += b.dla.attn[l] + b.dla.mlp[l]; ys.push(s); } const t = ys[ys.length - 1] || 1; return resample(ys.map(y => y / t)); };
+  const faith = b => { const c = b.circuit && b.circuit.faithfulness && b.circuit.faithfulness.curve; if (!c) return Array(24).fill(0); const n = b.circuit.n_components, pts = [[0, 0], ...c.map(x => [x.size / n, x.circuit])];
+    return Array.from({ length: 24 }, (_, i) => { const x = 0.5 * i / 23; let a = pts[0], d = pts[pts.length - 1]; for (let k = 0; k < pts.length - 1; k++) if (pts[k][0] <= x && pts[k + 1][0] >= x) { a = pts[k]; d = pts[k + 1]; break; } if (x >= d[0]) return d[1]; return a[1] + (d[1] - a[1]) * (x - a[0]) / ((d[0] - a[0]) || 1); }); };
+  const legend2 = el("div", { class: "legend" }, got.map((b, i) => el("span", { style: `color:${cols[i]}` }, `● ${name(b)}`)));
+  const row = (label, f) => el("tr", {}, el("td", {}, label), got.map(b => el("td", { class: "mono" }, f(b))));
+  const ninety = b => { const m = b.circuit && b.circuit.faithfulness && (b.circuit.faithfulness.minimal || []).find(x => x.threshold === 0.9); return m && m.size ? `${m.size} of ${b.circuit.n_components} (${(100 * m.share).toFixed(0)}%)` : "–"; };
+  const heads = b => b.dla.heads.flatMap((r2, l) => r2.map((v, h) => [v, l, h])).sort((a, c) => Math.abs(c[0]) - Math.abs(a[0])).slice(0, 4).map(([v, l, h]) => { const ro = roleOf(b, l, h); return `${l}.${h} ${fmt(v, 1)}${ro ? " (" + ro.role + ")" : ""}`; }).join(", ");
+  return el("div", { class: "grid" }, top,
+    el("div", { class: "grid g11" },
+      panel("When does the answer appear?", "Probability of the target read off the residual stream, by depth. A late, sharp rise means the answer is assembled near the end.", lineChart(series(b => resample(b.logit_lens.target_prob)), depth, v => (100 * v).toFixed(0) + "%"), legend2.cloneNode(true)),
+      panel("Where is the answer written?", "Running total of every component's direct effect, as a share of the final metric. Dips are layers that push against the answer.", lineChart(series(cum), depth, v => (100 * v).toFixed(0) + "%"), legend2.cloneNode(true))),
+    el("div", { class: "grid g11" },
+      panel("How compact is the circuit?", "Behaviour kept as more of the top-ranked components are allowed to run (x: share of all components, 0–50%). A curve that rises early means a small circuit does the work.", lineChart(series(faith), Array.from({ length: 24 }, (_, i) => i % 4 === 0 ? Math.round(50 * i / 23) + "%" : ""), v => (100 * v).toFixed(0) + "%"), legend2.cloneNode(true)),
+      panel("Side by side", null, el("div", { class: "scroll" }, el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, ""), got.map((b, i) => el("th", { style: `color:${cols[i]}` }, name(b))))),
+        el("tbody", {}, row("Prompt", b => b.prompt.length > 34 ? b.prompt.slice(0, 32) + "…" : b.prompt), row("Size", b => `${b.model.n_layers}L × ${b.model.n_heads}H · ${(b.model.n_params / 1e6).toFixed(0)}M`), row("Top prediction", b => `${show(b.predictions.top[0].token)} ${(100 * b.predictions.top[0].prob).toFixed(0)}%`), row("Metric", b => fmt(b.predictions.metric)),
+          row("Answer on top from", b => { const i = b.logit_lens.target_rank.findIndex(r2 => r2 === 0); return i < 0 ? "never" : `layer ${i} of ${b.model.n_layers}`; }), row("Attention vs MLP", b => `${fmt(b.dla.attn.reduce((a, c) => a + c, 0), 1)} / ${fmt(b.dla.mlp.reduce((a, c) => a + c, 0), 1)}`),
+          row("Top direct heads", heads), row("Components for 90%", ninety), row("Checks confirmed", b => b.verification ? `${b.verification.filter(v => v.predicted * v.measured > 0).length} of ${b.verification.length}` : "–"), row("Token-score error", b => (100 * (b.input_attribution.ig_relative_error || 0)).toFixed(0) + "%")))))));
+}
+
 function formReq() { return { prompt: $("#f-prompt").value, corrupt: $("#f-corrupt").value || null, target: $("#f-target").value || null, contrast: $("#f-contrast").value || null, model: $("#f-model").value || "gpt2" }; }
 function fillForm(b) { const r = b.request || {}; const ms = $("#f-model"); if (![...ms.options].some(o => o.value === b.model.name)) ms.append(el("option", { value: b.model.name }, b.model.name)); ms.value = b.model.name; $("#f-prompt").value = b.prompt; $("#f-corrupt").value = b.corrupt_prompt || ""; const j = v => Array.isArray(v) ? v.join("|") : v; $("#f-target").value = j(r.target) || b.predictions.target.token; $("#f-contrast").value = j(r.contrast) || (b.predictions.contrast ? b.predictions.contrast.token : ""); }
-function route() { const h = location.hash.slice(1); return ["trace", "circuit", "atlas", "concepts", "training", "blackbox", "agent"].includes(h) ? h : "trace"; }
+function route() { const h = location.hash.slice(1); return ["map", "trace", "circuit", "compare", "atlas", "concepts", "training", "blackbox", "agent"].includes(h) ? h : "map"; }
 function render() {
   const r = route(), v = $("#view");
   document.querySelectorAll("#nav a").forEach(a => a.setAttribute("aria-current", String(a.getAttribute("href") === "#" + r)));
-  $("#runpanel").hidden = ["training", "atlas", "concepts"].includes(r);
+  $("#runpanel").hidden = ["training", "atlas", "concepts", "compare"].includes(r);
   const keep = document.activeElement && document.activeElement.id, b = S.bundle;
   let node;
   if (r === "training") node = viewTraining(S.training);
   else if (r === "atlas") node = viewAtlas();
+  else if (r === "compare") node = viewCompare();
   else if (r === "concepts") node = viewConcepts();
   else if (!b) node = panel("Loading", S.error || "Fetching the example…");
-  else node = { trace: viewTrace, circuit: viewCircuit, blackbox: viewBlackbox, agent: viewAgent }[r](b);
+  else node = { map: viewMap, trace: viewTrace, circuit: viewCircuit, blackbox: viewBlackbox, agent: viewAgent }[r](b);
   v.replaceChildren(node);
   if (keep && document.getElementById(keep)) document.getElementById(keep).focus();
 }
-async function pick(id) { S.agent = null; S.bbResult = null; S.inspect = null; S.bundle = await loadBundle(id); fillForm(S.bundle); render(); }
+async function pick(id) { S.agent = null; S.bbResult = null; S.inspect = null; S.mapSel = null; S.bundle = await loadBundle(id); fillForm(S.bundle); render(); }
 async function runSweep(ev) {
   ev.preventDefault(); const btn = $("#f-run"); btn.disabled = true; btn.textContent = "Running…"; $("#runnote").textContent = "Running every method on the model. A fresh prompt takes about 10–20 seconds on CPU.";
   try { S.bundle = await getJSON("api/sweep", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(formReq()) }); S.agent = null; S.bbResult = null; S.inspect = null;
