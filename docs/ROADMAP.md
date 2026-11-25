@@ -79,6 +79,12 @@ Exit test (met), GPT-2 small, 12 prompts per task:
 Still weak, measured: Qwen2.5-0.5B needs 159 of 360 components for 90% on the indirect-object prompt, so the
 ranking does not yet isolate a compact circuit there.
 
+## Phase 0.95 — Stability and summary scores (done, cycle of 2026-11-25)
+
+Task-level circuits report how much they depend on the prompts sampled (bootstrap overlap and per-edge selection
+frequency), and every circuit reports the area under its faithfulness curve. On 12 prompts per task the resampled
+circuits overlap 0.81–0.82. Next candidates: EAP-GP integration paths for the weak Qwen result; edge-level pruning.
+
 ## Phase 1 — Model coverage
 
 | Work | Why | Exit test |

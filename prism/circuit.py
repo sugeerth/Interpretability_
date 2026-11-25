@@ -91,6 +91,44 @@ def edge_attribution(m: WhiteBoxModel, task: Task, corrupt_ids: torch.Tensor, st
                 clean_metric=m_clean, corrupt_metric=m_cor, sequential=bool(sequential), steps=steps)
 
 
+def curve_metrics(curve: list, n_components: int) -> dict:
+    """Summaries of a faithfulness curve in the style of the Mechanistic
+    Interpretability Benchmark (Mueller et al. 2025): the area under
+    faithfulness-vs-circuit-size (higher = the ranking finds what matters
+    early) and the area between the curve and full faithfulness (lower = the
+    circuits are faithful at every size). x is the share of components kept,
+    integrated by the trapezoid rule from 0 to the largest size measured."""
+    pts = [(0.0, 0.0)] + sorted((c["size"] / n_components, c["circuit"]) for c in curve)
+    if len(pts) < 2:
+        return dict(area_under=None, area_to_full=None, x_max=None)
+    span = pts[-1][0] or 1.0
+    au = sum((x2 - x1) * (y1 + y2) / 2 for (x1, y1), (x2, y2) in zip(pts, pts[1:])) / span
+    gap = sum((x2 - x1) * (abs(1 - y1) + abs(1 - y2)) / 2 for (x1, y1), (x2, y2) in zip(pts, pts[1:])) / span
+    return dict(area_under=r(au, 3), area_to_full=r(gap, 3), x_max=r(span, 3))
+
+
+def stability(stack: torch.Tensor, n_edges: int, n_boot: int = 40, seed: int = 0) -> dict:
+    """How much does the circuit depend on which prompts were used?
+
+    Edge scores from gradient methods are noisy estimates (Méloux et al. 2026).
+    Prompts are resampled with replacement; for each resample the top
+    ``n_edges`` edges of the mean score are taken. Returns the mean pairwise
+    Jaccard overlap of those edge sets and, per edge, how often it was
+    selected. Needs no extra model calls."""
+    n = stack.shape[0]
+    g = torch.Generator().manual_seed(seed)
+    k = min(n_edges, int((stack.abs().sum(0) > 0).sum()))
+    sets = []
+    for _ in range(n_boot):
+        idx = torch.randint(0, n, (n,), generator=g)
+        sets.append(set(stack[idx].mean(0).abs().flatten().topk(k).indices.tolist()))
+    jac = [len(a & b) / len(a | b) for i, a in enumerate(sets) for b in sets[i + 1:]]
+    freq = torch.zeros(stack[0].numel())
+    for st in sets:
+        freq[list(st)] += 1
+    return dict(n_boot=n_boot, n_prompts=n, edge_jaccard=r(sum(jac) / len(jac), 3), freq=(freq / n_boot).view_as(stack[0]))
+
+
 def _on_path(edges: list) -> list:
     """Keep edges that lie on some path emb -> ... -> out."""
     fwd, back = {"emb"}, {"out"}
@@ -198,11 +236,21 @@ def _build(m, items, n_edges, sizes=None, n_random: int = 5, seed: int = 0, thre
     nodes = sorted({n for e in edges for n in e[:2]}, key=lambda n: (ea["up"] + ["out"]).index(n))
     circuit_nodes = {n for n in nodes if n not in ("emb", "out")}
 
+    stab = stability(stack, n_edges) if len(items) >= 4 else None
+
     def edge(u, v, w):
         e = dict(src=u, dst=v, weight=r(w, 4), sign_agreement=r(float(agree[ui[u], vi[v]]), 2))
+        if stab:
+            e["selection_frequency"] = r(float(stab["freq"][ui[u], vi[v]]), 2)
         if single:
             e.update(pos=int(ea["pos"][ui[u], vi[v]]), token=toks[int(ea["pos"][ui[u], vi[v]])])
         return e
+    out_edges = [edge(u, v, w) for u, v, w in edges]
+    stab_out = None
+    if stab:
+        fr = [e["selection_frequency"] for e in out_edges]
+        stab_out = dict(n_boot=stab["n_boot"], edge_jaccard=stab["edge_jaccard"], stable_edges=sum(f >= 0.9 for f in fr),
+                        unstable_edges=sum(f < 0.5 for f in fr), n_edges=len(fr))
     return dict(
         method=f"EAP-IG ({ea['steps']} steps)", sequential=ea["sequential"], n_components=len(comp), n_prompts=len(items),
         clean_metric=r(sum(it[2]["clean_metric"] for it in items) / len(items)),
@@ -210,6 +258,8 @@ def _build(m, items, n_edges, sizes=None, n_random: int = 5, seed: int = 0, thre
         nodes=[dict(id=n, kind="emb" if n == "emb" else "out" if n == "out" else "head" if n[0] == "a" else "mlp",
                     layer=None if n in ("emb", "out") else int(n[1:].split(".")[0]),
                     index=int(n.split(".")[1]) if n[0] == "a" else None, importance=r(imp.get(n, 0.0), 3)) for n in nodes],
-        edges=[edge(u, v, w) for u, v, w in edges],
-        faithfulness=dict(circuit_nodes=len(circuit_nodes), value=r(faith(circuit_nodes), 3), curve=curve, minimal=minimal),
+        edges=out_edges,
+        faithfulness=dict(circuit_nodes=len(circuit_nodes), value=r(faith(circuit_nodes), 3), curve=curve, minimal=minimal,
+                          **curve_metrics(curve, len(comp))),
+        stability=stab_out,
         ranked_components=[dict(id=n, importance=r(imp[n], 3)) for n in ranked[:24]])

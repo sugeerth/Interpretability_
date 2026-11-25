@@ -212,3 +212,18 @@ def test_greater_than_dataset_and_reference():
                 edges=[dict(src="a5.5", dst="m9"), dict(src="m9", dst="out"), dict(src="m9", dst="a5.5")])
     s = score_circuit("greater_than", circ)
     assert s["circuit_heads"] == 3 and s["head_recall"] == round(2 / 12, 3) and s["edges_matching_paper_wiring"] == 2 and s["edges_unexplained"] == 1
+
+
+def test_curve_metrics_and_stability():
+    import torch as T
+    from prism.circuit import curve_metrics, stability
+    perfect = curve_metrics([dict(size=1, circuit=1.0), dict(size=10, circuit=1.0)], 20)
+    flat = curve_metrics([dict(size=10, circuit=0.0)], 20)
+    assert perfect["area_under"] > 0.9 and perfect["area_to_full"] < 0.1 and flat["area_under"] == 0.0 and flat["area_to_full"] == 1.0
+    g = T.Generator().manual_seed(0)
+    signal = T.zeros(6, 8); signal[0, :3] = 5.0
+    same = T.stack([signal + 0.01 * T.randn(6, 8, generator=g) for _ in range(8)])
+    noise = T.stack([T.randn(6, 8, generator=g) for _ in range(8)])
+    a, b = stability(same, 3), stability(noise, 3)
+    assert a["edge_jaccard"] == 1.0 and b["edge_jaccard"] < 0.6
+    assert float(a["freq"][0, 0]) == 1.0 and float(a["freq"][3, 3]) == 0.0

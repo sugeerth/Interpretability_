@@ -335,7 +335,7 @@ function componentCircuit(c, title, sub, bench) {
     svg.append(mk("text", { x: 30 + colW * (ci + 0.5), y: 14, "font-size": 10.5, "text-anchor": "middle", class: "mut" }, k === "emb" ? "input" : k === "out" ? "output" : "layer " + k)); });
   const mx = maxAbs(c.edges.map(e => e.weight)), eg = mk("g", {}), ng = mk("g", {});
   const els = c.edges.map(e => { const [x1, y1] = pos[e.src], [x2, y2] = pos[e.dst], mxx = (x1 + x2) / 2;
-    const p = mk("path", { d: `M${x1},${y1} C${mxx},${y1} ${mxx},${y2} ${x2},${y2}`, fill: "none", stroke: e.weight >= 0 ? "var(--pos)" : "var(--neg)", "stroke-width": (0.7 + 5 * Math.abs(e.weight) / mx).toFixed(2), "stroke-opacity": 0.45 });
+    const p = mk("path", { d: `M${x1},${y1} C${mxx},${y1} ${mxx},${y2} ${x2},${y2}`, fill: "none", stroke: e.weight >= 0 ? "var(--pos)" : "var(--neg)", "stroke-width": (0.7 + 5 * Math.abs(e.weight) / mx).toFixed(2), "stroke-opacity": 0.45, ...(e.selection_frequency !== undefined && e.selection_frequency < 0.9 ? { "stroke-dasharray": "4 3" } : {}) });
     eg.append(p); return [e, p]; });
   const label = id => id === "emb" ? "tokens" : id === "out" ? "answer" : id[0] === "a" ? id.slice(1) : "MLP " + id.slice(1);
   const info = el("div", { class: "note" }, "Hover or focus a component to isolate its edges.");
@@ -345,7 +345,7 @@ function componentCircuit(c, title, sub, bench) {
     g.append(mk("rect", { x: cx - w / 2, y: cy - 10, width: w, height: 20, rx: n.kind === "mlp" ? 2 : 10, fill: n.kind === "out" ? "var(--accent)" : "var(--panel)", stroke: "var(--ink)", "stroke-width": 1 }),
       mk("text", { x: cx, y: cy + 3.5, "font-size": 10.5, "text-anchor": "middle", style: n.kind === "out" ? "fill:var(--accent-ink)" : "" }, label(n.id)));
     const on = () => { focus(n.id); const ins = c.edges.filter(e => e.dst === n.id).sort((a, b) => Math.abs(b.weight) - Math.abs(a.weight)).slice(0, 3), outs = c.edges.filter(e => e.src === n.id).sort((a, b) => Math.abs(b.weight) - Math.abs(a.weight)).slice(0, 3);
-      const f = e => `${label(e.src)}→${label(e.dst)} ${fmt(e.weight)}${e.token ? " at " + show(e.token) : ""}`;
+      const f = e => `${label(e.src)}→${label(e.dst)} ${fmt(e.weight)}${e.token ? " at " + show(e.token) : ""}${e.selection_frequency !== undefined && e.selection_frequency < 0.9 ? " (in " + Math.round(100 * e.selection_frequency) + "% of resamples)" : ""}`;
       info.textContent = `${n.kind === "head" ? "Head " : ""}${label(n.id)}${role(n.id) && c.sequential !== undefined && bench ? " · " + role(n.id) : ""}` + (ins.length ? " · reads from: " + ins.map(f).join(", ") : "") + (outs.length ? " · writes to: " + outs.map(f).join(", ") : ""); };
     g.addEventListener("mouseenter", on); g.addEventListener("focus", on); g.addEventListener("mouseleave", () => focus(null)); g.addEventListener("blur", () => focus(null)); ng.append(g); });
   svg.append(eg, ng);
@@ -356,6 +356,11 @@ function componentCircuit(c, title, sub, bench) {
     el("div", { class: "grid g11" },
       panel("Does the circuit explain the behaviour?", `Faithfulness test: the listed components run on the clean prompt and every other head and MLP is replaced by its value from the corrupted prompt. The ${F.circuit_nodes} components in the graph keep ${(100 * F.value).toFixed(0)}% of the behaviour.`,
         chart, (F.minimal || []).some(x => x.size) ? el("div", { class: "kv" }, F.minimal.filter(x => x.size).map(x => el("span", {}, el("b", {}, `${x.size} (${(100 * x.share).toFixed(0)}%)`), `components needed to keep ${(100 * x.threshold).toFixed(0)}%`))) : el("div", { class: "note" }, "No subset of the ranking reaches 50%: the ranking does not isolate this behaviour."),
+        (F.area_under !== undefined && F.area_under !== null) || c.stability ? el("div", { class: "kv" },
+          F.area_under !== undefined && F.area_under !== null ? el("span", {}, el("b", {}, F.area_under.toFixed(2)), `area under the curve (1 = perfect, over the first ${(100 * F.x_max).toFixed(0)}% of components)`) : null,
+          c.stability ? el("span", {}, el("b", {}, `${c.stability.stable_edges} of ${c.stability.n_edges}`), `edges chosen in at least 90% of ${c.stability.n_boot} prompt resamples`) : null,
+          c.stability ? el("span", {}, el("b", {}, c.stability.edge_jaccard.toFixed(2)), "overlap between resampled circuits (1 = identical)") : null) : null,
+        c.stability ? null : el("div", { class: "sub" }, "From one prompt pair, so there is no stability estimate; the task-level circuit on the Atlas tab has one."),
         el("div", { class: "legend" }, el("span", { style: "color:var(--accent)" }, "● top-ranked components"), el("span", {}, "● random components of the same count"), `x: components kept, of ${c.n_components}`)),
       bench ? panel("Against the published circuit", `Reference: ${bench.source}.`,
         el("div", { class: "kv" }, el("span", {}, el("b", {}, `${Math.round(bench.head_recall * bench.reference_heads)} of ${bench.reference_heads}`), "reference components in the discovered circuit"),
@@ -452,7 +457,7 @@ function viewAtlas() {
         el("div", { class: "scroll" }, el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, "Head class in the paper"), el("th", {}, "Recovered by head patching"))),
           el("tbody", {}, cls.map(([c, hs]) => el("tr", {}, el("td", {}, c.replace(/_/g, " ")), el("td", { class: "mono" }, hs.length ? hs.map(h => h.join(".")).join("  ") : "none in top " + B.k)))))),
         el("div", { class: "note" }, "Misses are informative: the heads that act earliest each carry a small share of the effect, so they fall below the top-" + B.k + " cut.")) : null));
-    if (C.circuit) out.append(componentCircuit(C.circuit, `Task-level circuit · averaged over ${C.circuit.n_prompts} prompts`, "Edge scores averaged across prompts with different names, places and objects, so the graph describes the task instead of one sentence. Hover a head to see its role from the atlas above.", C.circuit_benchmark));
+    if (C.circuit) out.append(componentCircuit(C.circuit, `Task-level circuit · averaged over ${C.circuit.n_prompts} prompts`, "Edge scores averaged across prompts built from different templates, so the graph describes the task instead of one sentence. Dashed edges are ones that drop out when the prompts are resampled. Hover a component to see its connections.", C.circuit_benchmark));
     out.append(panel("Features that recur across the corpus", "SAE features ranked by how often they are among a prompt's most causally important features, times their mean ablation effect.",
       el("div", { class: "grid", style: "grid-template-columns:repeat(auto-fit,minmax(260px,1fr))" }, C.features.slice(0, 12).map(f => el("div", { class: "feat" }, el("span", { class: "expl" }, f.explanation || "no Neuronpedia label"),
         el("span", { class: "meta" }, `L${f.layer} #${f.index} · in ${(100 * f.frequency).toFixed(0)}% of prompts · at ${f.tokens.slice(0, 2).map(show).join(" ")} · `, f.url ? el("a", { href: f.url, target: "_blank", rel: "noopener" }, "Neuronpedia") : ""),

@@ -3,6 +3,21 @@
 A running survey of interpretability tooling, newest first. Each entry says what was found, what it means
 for Prism, and what (if anything) was done about it. Entries are added by the scheduled research session.
 
+## 2026-11-25 — scheduled cycle
+
+| Finding | Source | Relevance to Prism | Action |
+|---|---|---|---|
+| Fast approximations such as edge attribution patching and its successors add estimation noise to discovered circuits (Méloux et al., revised May 2026). | Search summary of the paper; the paper itself was not opened | Prism's circuits come from EAP with integrated gradients and reported no measure of how much they depend on the prompts sampled. | **Implemented**: bootstrap stability in `prism/circuit.py` — prompts are resampled, the circuit is re-selected, and the overlap and per-edge selection frequency are reported. |
+| MIB, a mechanistic interpretability benchmark, scores circuit discovery by integrating faithfulness over circuit sizes. | [arXiv 2504.13151](https://arxiv.org/pdf/2504.13151) | Prism reported a curve and three thresholds but no single comparable number. | **Implemented**: area under the faithfulness curve and area to full faithfulness. These follow the idea, not MIB's exact protocol or datasets. |
+| EAP-GP builds the integration path from gradient differences to reduce saturation, reporting up to 17.7% better faithfulness on GPT-2. | [arXiv 2502.06852](https://arxiv.org/html/2502.06852v1) | A drop-in alternative to the straight-line path in `edge_attribution`; a candidate fix for the weak Qwen result. | Next-cycle candidate. |
+| HAP: attribution patching to pick a candidate subgraph, then edge pruning; 46% faster at equal faithfulness. | [arXiv 2510.03282](https://arxiv.org/html/2510.03282v1) | Prism prunes nodes by binary search over a ranking; edge-level pruning would give smaller circuits. | Noted. |
+| circuit-tracer gained an nnsight engine, so graphs can be generated for any model given a mapping (Jan 2026); Neuronpedia generates graphs with attention (LORSA) nodes on Qwen3-1.7B (Apr 2026); Neuronpedia announced interp-engine (Aug 2026). | [Neuronpedia blog](https://www.neuronpedia.org/blog/assistant-axis), [interp explorer post](https://www.neuronpedia.org/blog/interp-explorer), [homepage](https://neuronpedia.org/) | Bears on roadmap phase 1 (remote backend, transcoder graphs). | Noted; interp-engine's contents were not retrieved. |
+| Goodfire released Silico, an agent-assisted tool for inspecting and adjusting models during training (Apr 2026). | [MIT Technology Review](https://www.technologyreview.com/2026/04/30/1136721/this-startups-new-mechanistic-interpretability-tool-lets-you-debug-llms/) | Closest product to Prism's training tracer plus agent. | Noted. |
+
+Measured after implementing: resampled circuits overlap 0.81 (indirect object) and 0.82 (greater-than) by Jaccard on
+12 prompts; 39 of 42 and 45 of 52 edges are selected in at least 90% of resamples. No interpretability tool
+released in November 2026 turned up in the search.
+
 ## 2026-11-22 (later) — second benchmark
 
 | Method | Source | Implemented as | Measured |

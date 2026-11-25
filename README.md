@@ -23,7 +23,7 @@ fine-tuning; and **black-box attribution** for models that are only reachable th
 | White-box backend | Hooks any Hugging Face causal LM by structure (GPT-2, Llama, Gemma, Qwen, Mistral, Pythia …): residual stream, per-head outputs, MLP neurons; patch / ablate / steer at any site | `prism/backend.py` |
 | Attribution | Logit lens · integrated gradients · gradient×input · direct logit attribution (layers, heads, neurons) · activation patching · attribution patching · exact per-head patching · attention patterns · dose-response sweeps · weight-level neuron profiles | `prism/methods.py` |
 | Features | SAE encoding, exact per-feature ablation effects, IG feature attribution, a token→feature→feature→output attribution graph; feature ids match Neuronpedia | `prism/sae.py`, `prism/neuronpedia.py` |
-| Circuit discovery | Edge attribution patching with integrated gradients over every input → head → MLP → output edge, pruned to paths from input to output, with a faithfulness test against random component sets and the smallest component set that keeps 50 / 80 / 90% of the behaviour; per prompt or averaged over a task | `prism/circuit.py` |
+| Circuit discovery | Edge attribution patching with integrated gradients over every input → head → MLP → output edge, pruned to paths from input to output, with a faithfulness test against random component sets the smallest component set that keeps 50 / 80 / 90% of the behaviour, the area under the faithfulness curve, and for task-level circuits a bootstrap estimate of how stable the edges are; per prompt or averaged over a task | `prism/circuit.py` |
 | Model atlas | Prompt-independent head roles (previous-token, duplicate-token, induction) measured on repeated random tokens | `prism/atlas.py` |
 | Concept directions | Difference-of-means directions from contrasting prompts, scored per layer on held-out pairs, matched to SAE features, tested by steering; needs no SAE | `prism/probe.py` |
 | Corpus sweeps | The analysis over many prompts with mean, spread and sign agreement per head, and recurring features | `prism/corpus.py` |
@@ -113,7 +113,7 @@ regenerate with `scripts/build_demo.py`):
 ## Development
 
 ```bash
-pytest -q                          # 33 tests on tiny random GPT-2 and Llama models, including the Claude-planned agent loop against a scripted transport, no network needed
+pytest -q                          # 34 tests on tiny random GPT-2 and Llama models, including the Claude-planned agent loop against a scripted transport, no network needed
 python scripts/build_demo.py       # regenerate web/bundles/ (downloads models, SAEs and WikiText-2; needs pyarrow)
 python scripts/build_static.py     # dist/ static site
 ```
