@@ -39,3 +39,25 @@ for f in sorted(root.glob("*.json")):
         continue
     f.write_text(json.dumps(b, ensure_ascii=False, separators=(",", ":")))
     print("patched circuit", f.name)
+
+# ---- circuits: ranking choice and exact pruning (recomputed; other sections untouched)
+from prism.circuit import discover_circuit      # noqa: E402
+from prism.workspace import summarize           # noqa: E402
+
+for f in sorted(root.glob("*.json")):
+    b = json.loads(f.read_text())
+    c = b.get("circuit") if isinstance(b, dict) else None
+    if not c or "ranking" in c:
+        continue
+    if b.get("kind") == "corpus":
+        name = "greater_than" if "greater" in f.name else "ioi"
+        res = run_benchmark(ws, name, c["n_prompts"])
+        b["circuit"], b["circuit_benchmark"] = res["circuit"], res["score"]
+    else:
+        req = b.get("request", {})
+        m = ws.model(b["model"]["name"])
+        task = M.make_task(m, b["prompt"], req.get("target"), req.get("contrast"))
+        b["circuit"] = discover_circuit(m, task, m.encode(b["corrupt_prompt"]), steps=3, n_random=3)
+        b["findings"] = summarize(b)
+    f.write_text(json.dumps(b, ensure_ascii=False, separators=(",", ":")))
+    print("patched pruning", f.name)

@@ -141,14 +141,18 @@ def _on_path(edges: list) -> list:
     return [e for e in edges if e[0] in fwd and e[1] in back]
 
 
-def faithfulness(m: WhiteBoxModel, task: Task, corrupt_ids: torch.Tensor, keep: set) -> float:
+def _reference(m: WhiteBoxModel, task: Task, corrupt_ids: torch.Tensor) -> tuple:
+    """Corrupted-run activations and the two end-point metrics, computed once per prompt pair."""
+    cor = m.forward(corrupt_ids, cache=["z", "mlp_out"])
+    return cor, float(task.metric(cor.logits)), float(task.metric(m.forward(task.ids).logits))
+
+
+def faithfulness(m: WhiteBoxModel, task: Task, corrupt_ids: torch.Tensor, keep: set, ref: Optional[tuple] = None) -> float:
     """Metric recovered when only ``keep`` (names like 'a9.9', 'm3') run on
     clean activations and every other head and MLP is replaced by its
     corrupted-run value. 1 = the kept set reproduces the full behaviour."""
     L, H, dh = m.n_layers, m.n_heads, m.d_z // m.n_heads
-    cor = m.forward(corrupt_ids, cache=["z", "mlp_out"])
-    m_cor = float(task.metric(cor.logits))
-    m_clean = float(task.metric(m.forward(task.ids).logits))
+    cor, m_cor, m_clean = ref or _reference(m, task, corrupt_ids)
     hooks = []
     for l in range(L):
         drop = [h for h in range(H) if f"a{l}.{h}" not in keep]
@@ -182,7 +186,8 @@ def corpus_circuit(m: WhiteBoxModel, pairs: list, n_edges: int = 60, steps: int 
     return _build(m, items, n_edges, **kw)
 
 
-def _build(m, items, n_edges, sizes=None, n_random: int = 5, seed: int = 0, thresholds=(0.5, 0.8, 0.9)) -> dict:
+def _build(m, items, n_edges, sizes=None, n_random: int = 5, seed: int = 0, thresholds=(0.5, 0.8, 0.9),
+           prune_at: Optional[float] = 0.9) -> dict:
     ea = items[0][2]
     stack = torch.stack([it[2]["scores"] for it in items])
     S = stack.mean(0)
@@ -197,20 +202,49 @@ def _build(m, items, n_edges, sizes=None, n_random: int = 5, seed: int = 0, thre
         k += n_edges // 2
         edges = _on_path(cand[:k])[:n_edges]
     ui, vi = {n: i for i, n in enumerate(ea["up"])}, {n: i for i, n in enumerate(ea["down"])}
-    # node importance = total attribution flowing through it (max of in / out so sources and sinks count)
-    inflow, outflow = S.abs().sum(0), S.abs().sum(1)
     comp = [n for n in ea["up"] if n != "emb"]
-    imp = {n: float(max(inflow[vi[n]], outflow[ui[n]])) for n in comp}
-    ranked = sorted(comp, key=lambda n: -imp[n])
-    faith = lambda keep: sum(faithfulness(m, t, c, keep) for t, c, _ in items) / len(items)
+    refs = [_reference(m, t, c) for t, c, _ in items]
+    faith = lambda keep: sum(faithfulness(m, t, c, keep, ref) for (t, c, _), ref in zip(items, refs)) / len(items)
     if sizes is None:                       # absolute sizes for small circuits, then fractions of the model
         sizes = sorted({2, 4, 8, 12, 16, 24, 32} | {max(2, round(f * len(comp))) for f in (0.1, 0.2, 0.3, 0.5)})
-    cache = {}
+    sizes = [s for s in sizes if s <= len(comp)]
+    # Two ways to rank components from the same edge scores:
+    #   flow    total |attribution| on its strongest side (in or out) - rewards well-connected hubs
+    #   effect  |sum of its outgoing edges| = the component's signed total effect (node attribution patching)
+    # Neither dominates across models, so both are tried and the one whose
+    # faithfulness curve stays closest to the full model is used; the choice and both scores are reported.
+    inflow, outflow = S.abs().sum(0), S.abs().sum(1)
+    scores = dict(flow={n: float(max(inflow[vi[n]], outflow[ui[n]])) for n in comp},
+                  effect={n: float(S[ui[n]].sum().abs()) for n in comp})
+    tried = {}
+    for name, sc in scores.items():
+        order = sorted(comp, key=lambda n: -sc[n])
+        vals = {k: faith(set(order[:k])) for k in sizes}
+        cm = curve_metrics([dict(size=k, circuit=v) for k, v in vals.items()], len(comp))
+        tried[name] = dict(order=order, cache=vals, area=cm["area_under"], gap=cm["area_to_full"])
+    ranking = min(tried, key=lambda n: tried[n]["gap"])       # closest to the full model at every size; overshoot counts against
+    imp, ranked, cache = scores[ranking], tried[ranking]["order"], dict(tried[ranking]["cache"])
 
     def at(k):                              # faithfulness of the k top-ranked components
         if k not in cache:
             cache[k] = faith(set(ranked[:k]))
         return cache[k]
+
+    def prune(th, k, budget=400):
+        """Attribution proposes, exact measurement disposes: starting from the top-k prefix, try
+        dropping each component (least important first) and keep the drop whenever faithfulness
+        stays within ``1 - th`` of the full model *on either side*. The upper bound matters: a set
+        that scores above 1 has dropped components that push against the answer, so it no longer
+        describes what the model does. One pass; every decision is an exact forward measurement."""
+        keep = list(ranked[:k])
+        ok = lambda f: th <= f <= 2 - th
+        if not ok(faith(set(keep))):                       # the prefix itself overshoots: nothing safe to remove
+            return keep
+        for n in reversed(ranked[:k][-budget:]):
+            trial = [x for x in keep if x != n]
+            if ok(faith(set(trial))):
+                keep = trial
+        return keep
 
     def smallest(th):
         """Smallest prefix of the ranking that keeps ``th`` of the behaviour (binary search, then a
@@ -228,8 +262,12 @@ def _build(m, items, n_edges, sizes=None, n_random: int = 5, seed: int = 0, thre
     for x in minimal:
         if x["size"]:
             x.update(share=r(x["size"] / len(comp), 3), components=ranked[:x["size"]] if x["size"] <= 40 else None)
+            if x["threshold"] == prune_at:
+                kept = prune(x["threshold"], x["size"])
+                x.update(pruned_size=len(kept), pruned_share=r(len(kept) / len(comp), 3),
+                         pruned_faithfulness=r(faith(set(kept)), 3), pruned_components=kept if len(kept) <= 80 else None)
     rng, curve = random.Random(seed), []
-    for size in [s for s in sizes if s <= len(comp)]:
+    for size in sizes:
         rand = [faith(set(rng.sample(comp, size))) for _ in range(n_random)]
         curve.append(dict(size=size, circuit=r(at(size), 3),
                           random_mean=r(sum(rand) / len(rand), 3), random_max=r(max(rand), 3)))
@@ -252,7 +290,7 @@ def _build(m, items, n_edges, sizes=None, n_random: int = 5, seed: int = 0, thre
         stab_out = dict(n_boot=stab["n_boot"], edge_jaccard=stab["edge_jaccard"], stable_edges=sum(f >= 0.9 for f in fr),
                         unstable_edges=sum(f < 0.5 for f in fr), n_edges=len(fr))
     return dict(
-        method=f"EAP-IG ({ea['steps']} steps)", sequential=ea["sequential"], n_components=len(comp), n_prompts=len(items),
+        method=f"EAP-IG ({ea['steps']} steps)", ranking=ranking, ranking_areas={n: tried[n]["area"] for n in tried}, ranking_gaps={n: tried[n]["gap"] for n in tried}, sequential=ea["sequential"], n_components=len(comp), n_prompts=len(items),
         clean_metric=r(sum(it[2]["clean_metric"] for it in items) / len(items)),
         corrupt_metric=r(sum(it[2]["corrupt_metric"] for it in items) / len(items)),
         nodes=[dict(id=n, kind="emb" if n == "emb" else "out" if n == "out" else "head" if n[0] == "a" else "mlp",

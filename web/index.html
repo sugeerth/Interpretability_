@@ -355,7 +355,8 @@ function componentCircuit(c, title, sub, bench) {
     panel(title, sub, el("div", { class: "scroll" }, svg), info, legend("inhibits", "excites")),
     el("div", { class: "grid g11" },
       panel("Does the circuit explain the behaviour?", `Faithfulness test: the listed components run on the clean prompt and every other head and MLP is replaced by its value from the corrupted prompt. The ${F.circuit_nodes} components in the graph keep ${(100 * F.value).toFixed(0)}% of the behaviour.`,
-        chart, (F.minimal || []).some(x => x.size) ? el("div", { class: "kv" }, F.minimal.filter(x => x.size).map(x => el("span", {}, el("b", {}, `${x.size} (${(100 * x.share).toFixed(0)}%)`), `components needed to keep ${(100 * x.threshold).toFixed(0)}%`))) : el("div", { class: "note" }, "No subset of the ranking reaches 50%: the ranking does not isolate this behaviour."),
+        chart, (F.minimal || []).some(x => x.size) ? el("div", { class: "kv" }, F.minimal.filter(x => x.size).map(x => el("span", {}, el("b", {}, `${x.size} (${(100 * x.share).toFixed(0)}%)`), `top-ranked components needed to keep ${(100 * x.threshold).toFixed(0)}%`)),
+          F.minimal.filter(x => x.pruned_size).map(x => el("span", {}, el("b", { style: "color:var(--accent)" }, `${x.pruned_size} (${(100 * x.pruned_share).toFixed(0)}%)`), `left after exact pruning, keeping ${(100 * x.pruned_faithfulness).toFixed(0)}%`))) : el("div", { class: "note" }, "No subset of the ranking reaches 50%: the ranking does not isolate this behaviour."),
         (F.area_under !== undefined && F.area_under !== null) || c.stability ? el("div", { class: "kv" },
           F.area_under !== undefined && F.area_under !== null ? el("span", {}, el("b", {}, F.area_under.toFixed(2)), `area under the curve (1 = perfect, over the first ${(100 * F.x_max).toFixed(0)}% of components)`) : null,
           c.stability ? el("span", {}, el("b", {}, `${c.stability.stable_edges} of ${c.stability.n_edges}`), `edges chosen in at least 90% of ${c.stability.n_boot} prompt resamples`) : null,
@@ -657,7 +658,9 @@ function viewMap(b) {
   const L = b.model.n_layers, H = b.model.n_heads, T = b.tokens.length, NS = "http://www.w3.org/2000/svg";
   const mk = (tag, a, txt) => { const n = document.createElementNS(NS, tag); for (const k in a) if (a[k] !== null && a[k] !== undefined) n.setAttribute(k, a[k]); if (txt !== undefined) n.textContent = txt; return n; };
   const hp = b.head_patching && b.head_patching.heads, mode = (S.mapMode === "patch" && hp) ? "patch" : "dla", grid = mode === "patch" ? hp : b.dla.heads;
-  const circ = b.circuit && b.circuit.edges ? b.circuit : null, inCirc = new Set(circ ? circ.nodes.map(n => n.id) : []);
+  const circ = b.circuit && b.circuit.edges ? b.circuit : null;
+  const pr90 = circ && (circ.faithfulness.minimal || []).find(x => x.threshold === 0.9 && x.pruned_components), minOn = S.mapOutline === "minimal" && pr90;
+  const inCirc = new Set(minOn ? pr90.pruned_components : circ ? circ.nodes.map(n => n.id) : []);
   const rh = Math.max(20, Math.min(40, 470 / L)), cw = Math.max(20, Math.min(46, 560 / (H + 1))), x0 = 52, y0 = 96;
   const headsW = cw * H, mlpX = x0 + headsW + cw * 0.75, lensX = mlpX + cw * 0.75 + 16, W = lensX + 190, yTok = y0 + rh * L + 34, Hh = yTok + 70;
   const yL = l => y0 + (L - 1 - l) * rh + rh / 2, xH = h => x0 + cw * (h + 0.5), xT = t => x0 + (mlpX + 18 - x0) * (t + 0.5) / T;
@@ -724,9 +727,10 @@ function viewMap(b) {
       await new Promise(r => setTimeout(r, Math.max(260, 5200 / L))); }
     gBack.querySelectorAll("[data-band]").forEach(n => n.setAttribute("fill-opacity", Number(n.getAttribute("data-band")) % 2 ? 0.55 : 0.3)); els.forEach(([e, p]) => p.classList.remove("flow")); dim(null); $("#mapstep") && ($("#mapstep").textContent = ""); S.mapPlaying = false; btn.disabled = false; };
   const head = el("div", { class: "phead" }, el("div", {}, el("h2", {}, `Model map · ${b.model.name.split("/").pop()}`), el("p", { class: "sub" }, "Read it bottom to top. Squares at the bottom are input tokens. Each circle is an attention head, each square on the right an MLP, sized by how much it matters and coloured by its effect on the answer. Lines are the discovered circuit. The column on the right is the model's running guess after each layer. Select any head to see where it looks.")),
-    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center" }, hp ? seg([["dla", "Colour: direct effect"], ["patch", "Colour: exact patching"]], mode, k => { S.mapMode = k; render(); }) : null, still ? null : el("button", { class: "ghost", type: "button", onclick: e => play(e.currentTarget) }, "▶ Play the computation")));
+    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center" }, hp ? seg([["dla", "Colour: direct effect"], ["patch", "Colour: exact patching"]], mode, k => { S.mapMode = k; render(); }) : null,
+      pr90 ? seg([["edges", "Outline: strongest edges"], ["minimal", `Outline: minimal circuit (${pr90.pruned_size})`]], minOn ? "minimal" : "edges", k => { S.mapOutline = k; render(); }) : null, still ? null : el("button", { class: "ghost", type: "button", onclick: e => play(e.currentTarget) }, "▶ Play the computation")));
   const out = el("div", { class: "grid" }, el("section", { class: "panel" }, head, el("div", { class: "grid mapgrid" }, el("div", { class: "scroll" }, svg), info), el("div", { id: "mapstep", class: "mono", style: "min-height:1.4em;font-size:12.5px;color:var(--accent)" }),
-    el("div", { class: "legend" }, "pushes against the answer", el("span", { class: "ramp" }), "pushes toward the answer", el("span", {}, "· dark outline = in the circuit"), b.head_patching && b.head_patching.measured < b.head_patching.total ? el("span", {}, "· dashed = not measured exactly") : null)),
+    el("div", { class: "legend" }, "pushes against the answer", el("span", { class: "ramp" }), "pushes toward the answer", el("span", {}, minOn ? `· dark outline = the ${pr90.pruned_size} components that keep ${(100 * pr90.pruned_faithfulness).toFixed(0)}% of the behaviour on their own` : "· dark outline = on a strongest-edge path"), b.head_patching && b.head_patching.measured < b.head_patching.total ? el("span", {}, "· dashed = not measured exactly") : null)),
     findingsPanel(b));
   setTimeout(() => select(S.mapSel && pos[S.mapSel] ? S.mapSel : null), 0);
   return out;
@@ -735,7 +739,7 @@ function mapSummary(b, circ) {
   const pr = b.predictions, f = circ && circ.faithfulness, ninety = f && (f.minimal || []).find(x => x.threshold === 0.9 && x.size);
   const tops = b.dla.heads.flatMap((row, l) => row.map((v, h) => [v, l, h])).sort((a, c) => Math.abs(c[0]) - Math.abs(a[0])).slice(0, 5);
   return el("div", { style: "display:flex;flex-direction:column;gap:10px" },
-    el("div", { class: "kv" }, el("span", {}, el("b", {}, fmt(pr.metric)), "metric"), el("span", {}, el("b", {}, `${b.model.n_layers} × ${b.model.n_heads}`), "layers × heads"), circ ? el("span", {}, el("b", {}, circ.edges.length), "circuit edges") : null, ninety ? el("span", {}, el("b", {}, `${ninety.size} of ${circ.n_components}`), "components keep 90%") : null),
+    el("div", { class: "kv" }, el("span", {}, el("b", {}, fmt(pr.metric)), "metric"), el("span", {}, el("b", {}, `${b.model.n_layers} × ${b.model.n_heads}`), "layers × heads"), circ ? el("span", {}, el("b", {}, circ.edges.length), "circuit edges") : null, ninety ? el("span", {}, el("b", {}, `${ninety.pruned_size || ninety.size} of ${circ.n_components}`), ninety.pruned_size ? `components keep ${(100 * ninety.pruned_faithfulness).toFixed(0)}%` : "components keep 90%") : null),
     el("div", {}, el("div", { class: "sub" }, "Strongest direct writers (select one on the map)"), el("div", { class: "chips" }, tops.map(([v, l, h]) => el("span", {}, `${l}.${h}  ${fmt(v)}`)))),
     circ ? null : el("div", { class: "note" }, "No circuit lines: add a corrupted prompt to discover which components talk to each other."),
     el("div", { class: "note" }, "Nothing selected. Select a head to draw its attention to the input tokens and list what it reads from and writes to."));
@@ -785,7 +789,7 @@ function viewCompare() {
     return Array.from({ length: 24 }, (_, i) => { const x = 0.5 * i / 23; let a = pts[0], d = pts[pts.length - 1]; for (let k = 0; k < pts.length - 1; k++) if (pts[k][0] <= x && pts[k + 1][0] >= x) { a = pts[k]; d = pts[k + 1]; break; } if (x >= d[0]) return d[1]; return a[1] + (d[1] - a[1]) * (x - a[0]) / ((d[0] - a[0]) || 1); }); };
   const legend2 = el("div", { class: "legend" }, got.map((b, i) => el("span", { style: `color:${cols[i]}` }, `● ${name(b)}`)));
   const row = (label, f) => el("tr", {}, el("td", {}, label), got.map(b => el("td", { class: "mono" }, f(b))));
-  const ninety = b => { const m = b.circuit && b.circuit.faithfulness && (b.circuit.faithfulness.minimal || []).find(x => x.threshold === 0.9); return m && m.size ? `${m.size} of ${b.circuit.n_components} (${(100 * m.share).toFixed(0)}%)` : "–"; };
+  const ninety = b => { const m = b.circuit && b.circuit.faithfulness && (b.circuit.faithfulness.minimal || []).find(x => x.threshold === 0.9); return m && m.size ? `${m.pruned_size || m.size} of ${b.circuit.n_components} (${(100 * (m.pruned_share || m.share)).toFixed(0)}%)` : "–"; };
   const heads = b => b.dla.heads.flatMap((r2, l) => r2.map((v, h) => [v, l, h])).sort((a, c) => Math.abs(c[0]) - Math.abs(a[0])).slice(0, 4).map(([v, l, h]) => { const ro = roleOf(b, l, h); return `${l}.${h} ${fmt(v, 1)}${ro ? " (" + ro.role + ")" : ""}`; }).join(", ");
   return el("div", { class: "grid" }, top,
     el("div", { class: "grid g11" },
@@ -796,7 +800,7 @@ function viewCompare() {
       panel("Side by side", null, el("div", { class: "scroll" }, el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, ""), got.map((b, i) => el("th", { style: `color:${cols[i]}` }, name(b))))),
         el("tbody", {}, row("Prompt", b => b.prompt.length > 34 ? b.prompt.slice(0, 32) + "…" : b.prompt), row("Size", b => `${b.model.n_layers}L × ${b.model.n_heads}H · ${(b.model.n_params / 1e6).toFixed(0)}M`), row("Top prediction", b => `${show(b.predictions.top[0].token)} ${(100 * b.predictions.top[0].prob).toFixed(0)}%`), row("Metric", b => fmt(b.predictions.metric)),
           row("Answer on top from", b => { const i = b.logit_lens.target_rank.findIndex(r2 => r2 === 0); return i < 0 ? "never" : `layer ${i} of ${b.model.n_layers}`; }), row("Attention vs MLP", b => `${fmt(b.dla.attn.reduce((a, c) => a + c, 0), 1)} / ${fmt(b.dla.mlp.reduce((a, c) => a + c, 0), 1)}`),
-          row("Top direct heads", heads), row("Components for 90%", ninety), row("Checks confirmed", b => b.verification ? `${b.verification.filter(v => v.predicted * v.measured > 0).length} of ${b.verification.length}` : "–"), row("Token-score error", b => (100 * (b.input_attribution.ig_relative_error || 0)).toFixed(0) + "%")))))));
+          row("Top direct heads", heads), row("Components for ~90%", ninety), row("Checks confirmed", b => b.verification ? `${b.verification.filter(v => v.predicted * v.measured > 0).length} of ${b.verification.length}` : "–"), row("Token-score error", b => (100 * (b.input_attribution.ig_relative_error || 0)).toFixed(0) + "%")))))));
 }
 
 function formReq() { return { prompt: $("#f-prompt").value, corrupt: $("#f-corrupt").value || null, target: $("#f-target").value || null, contrast: $("#f-contrast").value || null, model: $("#f-model").value || "gpt2" }; }

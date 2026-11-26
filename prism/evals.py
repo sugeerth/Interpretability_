@@ -122,4 +122,4 @@ def run_benchmark(ws, name: str, n: int = 12, steps: int = 5, progress=None) -> 
                 row=dict(task=ref["description"], reference=ref["source"],
                          components_found=f"{round(score['head_recall'] * score['reference_heads'])} of {score['reference_heads']}",
                          edges_matching=f"{score['edges_matching_paper_wiring']} of {score['edges_between_reference_heads']}",
-                         needed_for_90=f"{ninety.get('size')} of {circuit['n_components']}" if ninety.get("size") else "not reached"))
+                         needed_for_90=f"{ninety.get('pruned_size') or ninety.get('size')} of {circuit['n_components']}" if ninety.get("size") else "not reached"))

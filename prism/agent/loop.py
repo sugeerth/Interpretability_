@@ -392,7 +392,7 @@ def investigate_offline(prompt: str, ws: Workspace, model: str = "gpt2", target=
         inner = sorted((e for e in circ["edges"] if e["src"] != "emb" and e["dst"] != "out"), key=lambda e: -abs(e["weight"]))[:4]
         last = f["curve"][-1] if f["curve"] else dict(size=0, circuit=0, random_mean=0)
         inv.findings.append(dict(
-            claim=next((f"{x['size']} of {circ['n_components']} components ({100 * x['share']:.0f}%) are enough to keep 90% of the behaviour."
+            claim=next((f"{x.get('pruned_size') or x['size']} of {circ['n_components']} components ({100 * (x.get('pruned_share') or x['share']):.0f}%) are enough to keep about 90% of the behaviour."
                         for x in f.get("minimal", []) if x["threshold"] == 0.9 and x["size"]),
                        f"A {f['circuit_nodes']}-component circuit carries {100 * f['value']:.0f}% of the behaviour; the top {last['size']} components carry {100 * last['circuit']:.0f}%."),
             evidence="Kept components run on clean inputs, all others take corrupted-run values. Random sets of the same size keep "

@@ -216,7 +216,8 @@ def summarize(b: dict) -> list:
                              f"{f['circuit_nodes']} of {c['n_components']} components. Strongest internal edges: " +
                              ", ".join(f"{e['src'][1:] if e['src'][0] == 'a' else e['src']}→{e['dst'][1:] if e['dst'][0] == 'a' else e['dst']} ({e['weight']:+.2f})" for e in strongest) +
                              f". Faithfulness: with only those components on clean inputs and everything else corrupted, {100 * f['value']:.0f}% of the behaviour survives" +
-                             "".join(f"; {x['size']} components ({100 * x['share']:.0f}% of the model) are enough for {100 * x['threshold']:.0f}%"
+                             "".join((f"; after exact pruning, {x['pruned_size']} components ({100 * x['pruned_share']:.0f}% of the model) keep {100 * x['pruned_faithfulness']:.0f}%"
+                                      if x.get("pruned_size") else f"; {x['size']} components ({100 * x['share']:.0f}% of the model) are enough for {100 * x['threshold']:.0f}%")
                                      for x in f.get("minimal", []) if x["size"] and x["threshold"] == 0.9) +
                              (f"; the top {big['size']} components keep {100 * big['circuit']:.0f}% versus {100 * big['random_mean']:.0f}% for random sets of that size." if big else ".") +
                              (" Random sets do nearly as well here, so this test does not single out the circuit for this prompt." if big and big["random_mean"] > 0.3 else "")))

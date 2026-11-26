@@ -227,3 +227,19 @@ def test_curve_metrics_and_stability():
     a, b = stability(same, 3), stability(noise, 3)
     assert a["edge_jaccard"] == 1.0 and b["edge_jaccard"] < 0.6
     assert float(a["freq"][0, 0]) == 1.0 and float(a["freq"][3, 3]) == 0.0
+
+
+def test_pruning_and_ranking_choice(model):
+    from prism.circuit import discover_circuit, faithfulness
+    t = M.make_task(model, "hello world", "a", "b")
+    cor = model.encode("jello world")
+    c = discover_circuit(model, t, cor, n_edges=20, steps=2, n_random=1)
+    assert c["ranking"] in ("flow", "effect") and c["ranking_gaps"][c["ranking"]] == min(c["ranking_gaps"].values())
+    x = next(m_ for m_ in c["faithfulness"]["minimal"] if m_["threshold"] == 0.9)
+    if x["size"]:
+        assert x["pruned_size"] <= x["size"]
+        kept = set(x["pruned_components"])
+        f = faithfulness(model, t, cor, kept)
+        assert abs(f - x["pruned_faithfulness"]) < 1e-3
+        prefix = faithfulness(model, t, cor, set(x["components"]))
+        assert 0.9 <= f <= 1.1 or not (0.9 <= prefix <= 1.1)        # pruned set stays within 10% unless the prefix itself did not

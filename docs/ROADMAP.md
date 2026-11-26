@@ -85,6 +85,18 @@ Task-level circuits report how much they depend on the prompts sampled (bootstra
 frequency), and every circuit reports the area under its faithfulness curve. On 12 prompts per task the resampled
 circuits overlap 0.81–0.82. Next candidates: EAP-GP integration paths for the weak Qwen result; edge-level pruning.
 
+## Phase 0.97 — Attribution proposes, exact pruning disposes (done, 2026-11-26)
+
+- Two component rankings are derived from the same edge scores (total flow, and signed total effect); the one whose
+  faithfulness curve stays closest to the full model is used and both scores are reported.
+- After the ranked prefix reaches 90%, each component is tested for removal by exact measurement, keeping
+  faithfulness within 10% of the full model on either side (so components that push against the answer are not
+  pruned away).
+
+Measured: components that keep about 90% of the behaviour fell from 30 to 23 of 156 on the indirect-object task,
+from 24 to 20 on greater-than, and from 159 to 48 of 360 on Qwen2.5-0.5B (13% of the model). The previous Qwen
+weak spot is largely closed; integrated gradients on Qwen is not.
+
 ## Phase 1 — Model coverage
 
 | Work | Why | Exit test |

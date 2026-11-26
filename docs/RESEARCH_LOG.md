@@ -3,6 +3,15 @@
 A running survey of interpretability tooling, newest first. Each entry says what was found, what it means
 for Prism, and what (if anything) was done about it. Entries are added by the scheduled research session.
 
+## 2026-11-26 — attribution then pruning
+
+Built from the hybrid idea logged on 2026-11-25 ([HAP, arXiv 2510.03282](https://arxiv.org/html/2510.03282v1)), at
+the level of components rather than edges: gradient attribution proposes a ranked set, exact forward measurements
+decide what can be removed. Result: 23 of 156 components (indirect object), 20 of 156 (greater-than) and 48 of 360
+(Qwen2.5-0.5B) keep about 90% of the behaviour. Benchmark recall and wiring scores are unchanged. On Pythia-70m,
+the earlier reading that random component sets kept 53% does not reproduce with new samples (about 0%); it came
+from three random sets in a 54-component model, one of which was an outlier. EAP-GP remains untried.
+
 ## 2026-11-25 — scheduled cycle
 
 | Finding | Source | Relevance to Prism | Action |
