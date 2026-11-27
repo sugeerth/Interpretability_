@@ -1,0 +1,376 @@
+"""Attribution and causal methods for open-weights models.
+
+Everything is expressed against one scalar *metric*:
+
+    metric = logit[target] - logit[contrast]      (at the final position)
+
+so that input attribution, component attribution, patching, SAE features and
+interventions are directly comparable ("hand in hand") for the same prompt.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Optional
+
+import torch
+
+from .backend import Hook, WhiteBoxModel
+
+
+@dataclass
+class Task:
+    """A prompt and the scalar that every method explains.
+
+    ``targets`` / ``contrasts`` may hold one token each (metric = logit
+    difference) or sets of tokens (metric = log of the total probability mass
+    on the target set minus that of the contrast set). Sets express behaviours
+    that are not about a single word: "any year after 1732", "any female
+    pronoun", "any refusal opener".
+    """
+    ids: torch.Tensor              # [1,T]
+    targets: list
+    contrasts: list = field(default_factory=list)
+
+    @property
+    def target(self) -> int:
+        return self.targets[0]
+
+    @property
+    def contrast(self) -> Optional[int]:
+        return self.contrasts[0] if self.contrasts else None
+
+    @property
+    def is_set(self) -> bool:
+        return len(self.targets) > 1 or len(self.contrasts) > 1
+
+    def read(self, logits: torch.Tensor) -> torch.Tensor:
+        """logits [...,V] -> metric [...]"""
+        t = logits[..., self.targets].logsumexp(-1) if len(self.targets) > 1 else logits[..., self.targets[0]]
+        if not self.contrasts:
+            return t
+        return t - (logits[..., self.contrasts].logsumexp(-1) if len(self.contrasts) > 1 else logits[..., self.contrasts[0]])
+
+    def metric(self, logits: torch.Tensor) -> torch.Tensor:
+        """logits [B,T,V] -> [B]"""
+        return self.read(logits[:, -1])
+
+    def readout_weights(self, last_logits: torch.Tensor) -> dict:
+        """Token weights w with metric ≈ Σ w_t · logit_t to first order (exact for single tokens)."""
+        w = {}
+        for toks, sign in ((self.targets, 1.0), (self.contrasts, -1.0)):
+            if toks:
+                p = last_logits[toks].softmax(-1) if len(toks) > 1 else torch.ones(1)
+                for t, v in zip(toks, p):
+                    w[t] = w.get(t, 0.0) + sign * float(v)
+        return w
+
+
+def _ids(m: WhiteBoxModel, spec) -> list:
+    """'a' -> one token; 'a|b|c' or a list -> a token set."""
+    if spec is None or spec == "" or spec == []:
+        return []
+    parts = spec if isinstance(spec, (list, tuple)) else (spec.split("|") if "|" in spec and spec != "|" else [spec])
+    return list(dict.fromkeys(m.token_id(p) for p in parts if p != ""))
+
+
+def make_task(m: WhiteBoxModel, prompt: str, target=None, contrast=None) -> Task:
+    """``target`` / ``contrast``: a token string, several separated by '|', or a list of strings."""
+    ids = m.encode(prompt)
+    t = _ids(m, target) or [int(m.forward(ids).logits[0, -1].argmax())]
+    return Task(ids, t, _ids(m, contrast))
+
+
+def r(x, nd=4):
+    """Round tensors / floats into plain JSON."""
+    if isinstance(x, torch.Tensor):
+        x = x.detach().float().cpu().tolist()
+    if isinstance(x, float):
+        return round(x, nd)
+    if isinstance(x, (list, tuple)):
+        return [r(v, nd) for v in x]
+    return x
+
+
+# ----------------------------------------------------------------- outputs
+def predictions(m: WhiteBoxModel, task: Task, k: int = 10) -> dict:
+    logits = m.forward(task.ids).logits[0, -1]
+    p = logits.softmax(-1)
+    top = p.topk(k)
+    return dict(
+        top=[dict(token=m.tok.decode([int(i)]), id=int(i), prob=r(float(v)), logit=r(float(logits[i])))
+             for v, i in zip(top.values, top.indices)],
+        target=dict(token=m.tok.decode([task.target]), id=task.target, prob=r(float(p[task.target])),
+                    rank=int((logits > logits[task.target]).sum())),
+        contrast=None if task.contrast is None else dict(token=m.tok.decode([task.contrast]), id=task.contrast,
+                                                         prob=r(float(p[task.contrast]))),
+        metric=r(float(task.metric(logits[None, None]))),
+        target_set=None if not task.is_set else dict(n=len(task.targets), prob=r(float(p[task.targets].sum())),
+                                                    tokens=[m.tok.decode([t]) for t in task.targets[:12]]),
+        contrast_set=None if not task.is_set or not task.contrasts else dict(
+            n=len(task.contrasts), prob=r(float(p[task.contrasts].sum())), tokens=[m.tok.decode([t]) for t in task.contrasts[:12]]),
+        entropy=r(float(-(p * p.clamp_min(1e-12).log()).sum())),
+    )
+
+
+# -------------------------------------------------------------- logit lens
+def logit_lens(m: WhiteBoxModel, task: Task) -> dict:
+    """Decode every layer's residual stream with the final norm + unembedding."""
+    c = m.forward(task.ids, cache=["resid_pre"])
+    states = torch.cat([torch.stack(c.resid_pre, 0)[:, 0], c.resid_final], 0)      # [L+1,T,d]
+    logits = m.lens(states)                                                        # [L+1,T,V]
+    grid = task.read(logits)
+    last = logits[:, -1]
+    probs = last.softmax(-1)
+    return dict(
+        grid=r(grid, 3),                                                           # metric per layer x position
+        target_prob=r(probs[:, task.target]),
+        target_rank=[int((row > row[task.target]).sum()) for row in last],
+        top_token=[m.tok.decode([int(i)]) for i in last.argmax(-1)],
+        top_token_grid=[[m.tok.decode([int(i)]) for i in row] for row in logits.argmax(-1)],
+    )
+
+
+# ------------------------------------------------- direct logit attribution
+def direct_logit_attribution(m: WhiteBoxModel, task: Task, top_neurons: int = 25) -> dict:
+    """Split the metric over embeddings, attention heads, MLP layers and neurons."""
+    c = m.forward(task.ids, cache=["resid_pre", "attn_out", "mlp_out", "z", "neurons"])
+    final = c.resid_final[0, -1]
+    d, exact = m.unembed_dir(final, task.readout_weights(c.logits[0, -1]))
+    exact = exact and not task.is_set          # token-set metrics are linearised at the model's own distribution
+    attn = torch.stack([a[0, -1] @ d for a in c.attn_out])
+    mlp = torch.stack([x[0, -1] @ d for x in c.mlp_out])
+    embed = c.resid_pre[0][0, -1] @ d
+    H = m.n_heads
+    # with a post-norm on the block output, read each head / neuron through that run's frozen scale
+    da = lambda l: d if c.attn_scale[l] is None else d * c.attn_scale[l][0, -1]
+    dm = lambda l: d if c.mlp_scale[l] is None else d * c.mlp_scale[l][0, -1]
+    heads = torch.stack([(c.z[l][0, -1] * (m.attn_proj_matrix(l) @ da(l))).view(H, -1).sum(-1) for l in range(m.n_layers)])
+    neuron = torch.stack([c.neurons[l][0, -1] * (m.mlp_proj_matrix(l) @ dm(l)) for l in range(m.n_layers)])   # [L,d_mlp]
+    top = neuron.abs().flatten().topk(top_neurons).indices
+    return dict(
+        embed=r(float(embed)), attn=r(attn), mlp=r(mlp), heads=r(heads, 3),
+        neurons=[dict(layer=int(i // m.d_mlp), index=int(i % m.d_mlp), dla=r(float(neuron.flatten()[i])),
+                      act=r(float(c.neurons[int(i // m.d_mlp)][0, -1, int(i % m.d_mlp)]))) for i in top],
+        total=r(float(final @ d)), sum_components=r(float(embed + attn.sum() + mlp.sum())), exact_norm=exact,
+    )
+
+
+# -------------------------------------------------------- input attribution
+def input_attribution(m: WhiteBoxModel, task: Task, steps: int = 48, max_steps: int = 192) -> dict:
+    """Gradient×input and integrated gradients over the input embeddings.
+
+    The IG baseline is the mean token embedding at every position (an
+    uninformative but in-distribution input). A zero baseline is degenerate
+    for models whose first operation is a norm: on RMSNorm architectures it
+    leaves the path integral far from the true metric gap. The step count is
+    doubled until the attributions sum to within 5% of that gap, and the
+    remaining completeness error is returned so callers can judge the result.
+    """
+    emb = m.embed(task.ids).detach()
+    e = emb.clone().requires_grad_(True)
+    val = task.metric(m.forward(embeds=e, grad=True).logits)
+    g, = torch.autograd.grad(val.sum(), e)
+    gxi = (g * emb).sum(-1)[0]
+    base = m.embed.weight.detach().mean(0).expand_as(emb)
+    full = float(val.detach())
+    base_metric = float(task.metric(m.forward(embeds=base).logits))
+    gap = full - base_metric
+    while True:
+        total = torch.zeros_like(emb)
+        alphas = (torch.arange(steps, device=emb.device) + 0.5) / steps      # midpoint Riemann rule
+        for chunk in alphas.split(16):
+            x = (base + chunk.view(-1, 1, 1) * (emb - base)).requires_grad_(True)
+            gr, = torch.autograd.grad(task.metric(m.forward(embeds=x, grad=True).logits).sum(), x)
+            total += gr.sum(0, keepdim=True)
+        ig = ((emb - base) * total / steps).sum(-1)[0]
+        err = float(ig.sum()) - gap
+        if abs(err) <= 0.05 * abs(gap) or steps * 2 > max_steps:
+            break
+        steps *= 2
+    return dict(grad_x_input=r(gxi), integrated_gradients=r(ig), metric=r(full), baseline_metric=r(base_metric),
+                baseline="mean token embedding", steps=steps, ig_completeness_error=r(err),
+                ig_relative_error=r(abs(err) / (abs(gap) + 1e-9), 3))
+
+
+# ------------------------------------------------------- activation patching
+def activation_patching(m: WhiteBoxModel, task: Task, corrupt_ids: torch.Tensor, batch: int = 64) -> dict:
+    """Causal tracing: restore clean residual states into the corrupted run.
+
+    grid[layer][pos] = (metric(patched) - metric(corrupt)) / (metric(clean) - metric(corrupt)).
+    Also returns the gradient-based approximation (attribution patching) for
+    the residual stream and for every attention head.
+    """
+    if corrupt_ids.shape != task.ids.shape:
+        raise ValueError(f"clean and corrupted prompts must tokenize to the same length "
+                         f"({task.ids.shape[1]} vs {corrupt_ids.shape[1]})")
+    L, T = m.n_layers, task.ids.shape[1]
+    clean = m.forward(task.ids, cache=["resid_pre", "z"])
+    cor = m.forward(corrupt_ids, cache=["resid_pre", "z"], grad=True)
+    m_clean, m_cor = float(task.metric(clean.logits)), float(task.metric(cor.logits).detach())
+    denom = (m_clean - m_cor) or 1e-9
+    grads = torch.autograd.grad(task.metric(cor.logits).sum(), cor.resid_pre + cor.z)
+    attr_resid = torch.stack([((clean.resid_pre[l] - cor.resid_pre[l].detach()) * grads[l]).sum(-1)[0] for l in range(L)]) / denom
+    attr_heads = torch.stack([((clean.z[l] - cor.z[l].detach()) * grads[L + l])[0].sum(0).view(m.n_heads, -1).sum(-1)
+                              for l in range(L)]) / denom
+
+    cells = [(l, p) for l in range(L) for p in range(T)]
+    grid = torch.zeros(L, T)
+    for start in range(0, len(cells), batch):
+        chunk = cells[start:start + batch]
+
+        def mk(layer):
+            rows = [(i, p) for i, (l, p) in enumerate(chunk) if l == layer]
+
+            def fn(t):
+                t = t.clone()
+                for i, p in rows:
+                    t[i, p] = clean.resid_pre[layer][0, p]
+                return t
+            return fn
+        hooks = [Hook("resid_pre", l, mk(l)) for l in {l for l, _ in chunk}]
+        vals = task.metric(m.forward(corrupt_ids.expand(len(chunk), -1), hooks=hooks).logits)
+        for (l, p), v in zip(chunk, vals):
+            grid[l, p] = (float(v) - m_cor) / denom
+    return dict(resid=r(grid, 3), attribution_resid=r(attr_resid, 3), attribution_heads=r(attr_heads, 3),
+                clean_metric=r(m_clean), corrupt_metric=r(m_cor), corrupt_tokens=m.str_tokens(corrupt_ids),
+                approx_correlation=r(float(torch.corrcoef(torch.stack([grid.flatten(), attr_resid.flatten().cpu()]))[0, 1])))
+
+
+# ------------------------------------------------------------- interventions
+def head_hook(m: WhiteBoxModel, layer: int, head: int, scale: float = 0.0, pos: Optional[int] = None) -> Hook:
+    dh, sl = m.d_z // m.n_heads, slice(None) if pos is None else slice(pos, pos + 1)
+
+    def fn(t):
+        t = t.clone(); t[:, sl, head * dh:(head + 1) * dh] *= scale; return t
+    return Hook("z", layer, fn)
+
+
+def neuron_hook(layer: int, index: int, scale: float = 0.0, pos: Optional[int] = None) -> Hook:
+    sl = slice(None) if pos is None else slice(pos, pos + 1)
+
+    def fn(t):
+        t = t.clone(); t[:, sl, index] *= scale; return t
+    return Hook("neurons", layer, fn)
+
+
+def direction_hook(layer: int, direction: torch.Tensor, add: float = 0.0, pos: Optional[int] = None) -> Hook:
+    """add != 0: steer by ``add * direction``; add == 0: project the direction out."""
+    sl = slice(None) if pos is None else slice(pos, pos + 1)
+
+    def fn(t):
+        t = t.clone()
+        if add == 0:
+            u = direction / direction.norm()
+            t[:, sl] -= (t[:, sl] @ u).unsqueeze(-1) * u
+        else:
+            t[:, sl] += add * direction
+        return t
+    return Hook("resid_pre", layer, fn)
+
+
+def intervene(m: WhiteBoxModel, task: Task, hooks: list, k: int = 5, **describe) -> dict:
+    """Run the prompt with interventions and report the causal effect on the metric."""
+    base = m.forward(task.ids).logits
+    new = m.forward(task.ids, hooks=hooks).logits
+    pb, pn = base[0, -1].softmax(-1), new[0, -1].softmax(-1)
+    top = pn.topk(k)
+    return dict(**describe, metric_before=r(float(task.metric(base))), metric_after=r(float(task.metric(new))),
+                target_prob_before=r(float(pb[task.target])), target_prob_after=r(float(pn[task.target])),
+                kl=r(float((pb * (pb.clamp_min(1e-12).log() - pn.clamp_min(1e-12).log())).sum())),
+                top_after=[dict(token=m.tok.decode([int(i)]), prob=r(float(v))) for v, i in zip(top.values, top.indices)])
+
+
+# ------------------------------------------------------- exact head patching
+def head_patching(m: WhiteBoxModel, task: Task, corrupt_ids: torch.Tensor, batch: int = 72,
+                  candidates: Optional[list] = None) -> dict:
+    """Exact path-level check for heads: copy one head's clean output into the
+    corrupted run and measure how much of the metric it restores.
+
+    grid[layer][head] in units of the clean-vs-corrupted metric gap. This is
+    the exact counterpart of the gradient estimate in ``activation_patching``.
+    ``candidates`` restricts the work to given (layer, head) pairs — the
+    scalable recipe on large models is to rank all heads with the two-pass
+    gradient estimate and verify only the top ones exactly; unmeasured cells
+    are None.
+    """
+    if corrupt_ids.shape != task.ids.shape:
+        raise ValueError("clean and corrupted prompts must tokenize to the same length")
+    clean = m.forward(task.ids, cache=["z"])
+    m_clean = float(task.metric(clean.logits))
+    m_cor = float(task.metric(m.forward(corrupt_ids).logits))
+    denom = (m_clean - m_cor) or 1e-9
+    dh = m.d_z // m.n_heads
+    cells = candidates if candidates is not None else [(l, h) for l in range(m.n_layers) for h in range(m.n_heads)]
+    grid = [[None] * m.n_heads for _ in range(m.n_layers)]
+    for start in range(0, len(cells), batch):
+        chunk = cells[start:start + batch]
+
+        def mk(layer):
+            rows = [(i, h) for i, (l, h) in enumerate(chunk) if l == layer]
+
+            def fn(t):
+                t = t.clone()
+                for i, h in rows:
+                    t[i, :, h * dh:(h + 1) * dh] = clean.z[layer][0, :, h * dh:(h + 1) * dh]
+                return t
+            return fn
+        hooks = [Hook("z", l, mk(l)) for l in {l for l, _ in chunk}]
+        vals = task.metric(m.forward(corrupt_ids.expand(len(chunk), -1), hooks=hooks).logits)
+        for (l, h), v in zip(chunk, vals):
+            grid[l][h] = round((float(v) - m_cor) / denom, 3)
+    return dict(heads=grid, clean_metric=r(m_clean), corrupt_metric=r(m_cor), measured=len(cells),
+                total=m.n_layers * m.n_heads)
+
+
+# -------------------------------------------------------- attention patterns
+def attention_patterns(m: WhiteBoxModel, task: Task, heads: list) -> list:
+    """Where the given (layer, head) pairs look from the final position."""
+    c = m.forward(task.ids, cache=["attn"])
+    toks = m.str_tokens(task.ids)
+    out = []
+    for l, h in heads:
+        row = c.attn[l][0, h, -1]
+        top = row.topk(min(3, row.numel()))
+        out.append(dict(layer=l, head=h, pattern=r(row, 3), entropy=r(float(-(row * row.clamp_min(1e-9).log()).sum())),
+                        attends_to=[dict(pos=int(i), token=toks[int(i)], weight=r(float(v), 3)) for v, i in zip(top.values, top.indices)]))
+    return out
+
+
+def attention_last(m: WhiteBoxModel, task: Task) -> list:
+    """Attention from the final position for every head: [layer][head][position]."""
+    c = m.forward(task.ids, cache=["attn"])
+    return [r(a[0, :, -1], 2) for a in c.attn]
+
+
+# ---------------------------------------------------- weight-level profiles
+def neuron_profile(m: WhiteBoxModel, layer: int, index: int, k: int = 8) -> dict:
+    """What a neuron does according to the weights alone, input to output:
+    ``reads``     tokens whose embeddings most excite its input weight (the direct
+                  embedding -> neuron path; exact for layer 0, a first-order reading deeper)
+    ``promotes`` / ``suppresses``  tokens its output weight pushes through the unembedding."""
+    w_out = m.mlp_proj_matrix(layer)[index]                       # [d]
+    logit = m.W_U() @ w_out
+    hi, lo = logit.topk(k), (-logit).topk(k)
+    dec = lambda idx: [m.tok.decode([int(i)]) for i in idx]
+    reads = None
+    W_in = m.mlp_in_matrix(layer)
+    if W_in is not None:                                           # direct path token embedding -> neuron input
+        E = m.embed.weight
+        drive = (E - E.mean(0)) @ W_in[:, index]
+        reads = dec(drive.topk(k).indices)
+    return dict(layer=layer, index=index, reads=reads, promotes=dec(hi.indices), suppresses=dec(lo.indices),
+                promote_logits=r(hi.values, 2), suppress_logits=r(-lo.values, 2), out_norm=r(float(w_out.norm())),
+                logit_kurtosis=r(float(((logit - logit.mean()) ** 4).mean() / (logit.var() ** 2 + 1e-12)), 1))
+
+
+# ------------------------------------------------------------- dose-response
+def dose_response(m: WhiteBoxModel, task: Task, make_hook, values: list) -> dict:
+    """Metric and target probability as an intervention strength is swept.
+    ``make_hook(value) -> Hook``; all strengths run in one batch."""
+    out = []
+    for v in values:
+        logits = m.forward(task.ids, hooks=[make_hook(v)]).logits
+        p = logits[0, -1].softmax(-1)
+        out.append(dict(value=v, metric=r(float(task.metric(logits))), target_prob=r(float(p[task.target])),
+                        top=m.tok.decode([int(p.argmax())]), top_prob=r(float(p.max()))))
+    return dict(curve=out)

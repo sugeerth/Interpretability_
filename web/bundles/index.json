@@ -1,0 +1,67 @@
+[
+ {
+  "id": "gemma-capital",
+  "title": "Gemma 3 1B \u00b7 Eiffel Tower \u2192 Paris",
+  "kind": "sweep"
+ },
+ {
+  "id": "gemma-ioi",
+  "title": "Gemma 3 1B \u00b7 indirect object: who gets the drink?",
+  "kind": "sweep"
+ },
+ {
+  "id": "gemma-antonym",
+  "title": "Gemma 3 1B \u00b7 opposites: hot \u2192 cold",
+  "kind": "sweep"
+ },
+ {
+  "id": "ioi",
+  "title": "Indirect object: who gets the drink?",
+  "kind": "sweep"
+ },
+ {
+  "id": "capital",
+  "title": "Factual recall: Eiffel Tower \u2192 Paris",
+  "kind": "sweep"
+ },
+ {
+  "id": "greater",
+  "title": "Greater-than: the war lasted from 1732 to 17 (token-set metric)",
+  "kind": "sweep"
+ },
+ {
+  "id": "ioi-pythia",
+  "title": "Same task on Pythia-70m (second model)",
+  "kind": "sweep"
+ },
+ {
+  "id": "ioi-qwen",
+  "title": "Same task on Qwen2.5-0.5B (no SAE needed)",
+  "kind": "sweep"
+ },
+ {
+  "id": "atlas",
+  "title": "Head roles",
+  "kind": "atlas"
+ },
+ {
+  "id": "corpus",
+  "title": "Corpus sweep: indirect object, 24 prompts",
+  "kind": "corpus"
+ },
+ {
+  "id": "corpus-greater",
+  "title": "Corpus sweep: greater-than, 24 prompts",
+  "kind": "corpus"
+ },
+ {
+  "id": "concept",
+  "title": "Concept direction: sentiment",
+  "kind": "concept"
+ },
+ {
+  "id": "training",
+  "title": "Training phases: teaching GPT-2 a false fact",
+  "kind": "training"
+ }
+]
