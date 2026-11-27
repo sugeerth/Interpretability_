@@ -139,3 +139,37 @@ def test_llama_architecture():
     g = M.activation_patching(m, t, m.encode("jello world"))["resid"]
     assert abs(g[0][0] - 1) < 1e-2 and abs(g[0][3]) < 1e-2
     assert M.intervene(m, t, [M.head_hook(m, 2, 1), M.neuron_hook(1, 5)])["kl"] > 0
+
+
+def test_gemma_post_norm_architecture():
+    """Gemma blocks normalise each sub-layer's output before adding it to the stream; the decomposition
+    into heads, MLPs and neurons must still be exact, and circuits must still run."""
+    from transformers import Gemma3ForCausalLM, Gemma3TextConfig
+    from conftest import CharTok
+    from prism.backend import WhiteBoxModel
+    from prism.circuit import edge_attribution
+    torch.manual_seed(0)
+    cfg = Gemma3TextConfig(vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=3, num_attention_heads=4,
+                           num_key_value_heads=2, head_dim=8, max_position_embeddings=64, sliding_window=64,
+                           attn_implementation="eager", pad_token_id=0, bos_token_id=0, eos_token_id=1)
+    m = WhiteBoxModel(Gemma3ForCausalLM(cfg), CharTok(), name="tiny-gemma")
+    assert m.post_norm
+    t = M.make_task(m, "hello world", "a", "b")
+    c = m.forward(t.ids, cache=["resid_pre", "attn_out", "mlp_out", "z"])
+    assert torch.allclose(c.resid_pre[0] + sum(c.attn_out) + sum(c.mlp_out), c.resid_final, atol=1e-3)
+    assert torch.allclose(m.head_outputs(c, 1).sum(-2), c.attn_out[1], atol=1e-4)
+    d = M.direct_logit_attribution(m, t)
+    assert d["exact_norm"] and abs(d["total"] - M.predictions(m, t)["metric"]) < 1e-2 and abs(d["total"] - d["sum_components"]) < 1e-2
+    assert abs(sum(sum(r) for r in d["heads"]) - sum(d["attn"])) < 1e-2          # heads account for all of attention
+    ea = edge_attribution(m, t, m.encode("jello world"), steps=8)
+    assert ea["sequential"] and abs(float(ea["scores"][:, ea["down"].index("out")].sum()) - 1) < 0.25
+
+
+def test_jumprelu_sae():
+    from prism.sae import SAE
+    W = torch.eye(4)
+    s = SAE(W, torch.zeros(4), W.clone(), torch.ones(4), 0, threshold=torch.tensor([0.5, 0.5, 2.0, 2.0]), pre_bias=False)
+    x = torch.tensor([1.0, 0.2, 1.0, 3.0])
+    assert s.encode(x).tolist() == [1.0, 0.0, 0.0, 3.0]                            # below-threshold activations are zeroed
+    assert float(s.act_one(x, 3)) == 3.0 and float(s.act_one(x, 2)) == 0.0
+    assert s.decode(s.encode(x)).tolist() == [2.0, 1.0, 1.0, 4.0]

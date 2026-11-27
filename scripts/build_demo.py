@@ -64,8 +64,28 @@ res = investigate_offline(ws=ws, model=QW, **kw)
 b = res.pop("bundle"); b["agent"] = res; b["request"] = dict(kw, model=QW)
 save("ioi-qwen", "Same task on Qwen2.5-0.5B (no SAE needed)", "sweep", b)
 
+# ---- Gemma 3 1B with Gemma Scope 2 features (JumpReLU SAEs, post-norm blocks)
+GM = "unsloth/gemma-3-1b-pt"
+GEMMA = [
+    ("gemma-ioi", "Gemma 3 1B · indirect object: who gets the drink?", SWEEPS[0][2]),
+    ("gemma-capital", "Gemma 3 1B · Eiffel Tower → Paris", SWEEPS[1][2]),
+    ("gemma-antonym", "Gemma 3 1B · opposites: hot → cold", dict(
+        prompt="The opposite of hot is cold. The opposite of big is small. The opposite of up is", target=" down", contrast=" up",
+        corrupt="The opposite of hot is cold. The opposite of big is small. The opposite of left is")),
+]
+ws.models.clear()
+for name, title, kw in GEMMA:
+    res = investigate_offline(ws=ws, model=GM, **kw)
+    b = res.pop("bundle"); b["agent"] = res; b["request"] = dict(kw, model=GM)
+    b["blackbox"] = dict(occlusion(LocalScorer(ws.model(GM), kw["target"], kw["contrast"]), kw["prompt"]), provider="local",
+                         access="open-weights (as black box)", target=kw["target"])
+    save(name, title, "sweep", b)
+gemma_atlas = atlas(ws.model(GM))
+ws.models.clear()
+m = ws.model("gpt2")
+
 # ---- atlas: prompt-independent head roles for all three models
-save("atlas", "Head roles", "atlas", dict(kind="atlas", models=[atlas(m), atlas(ws.model(PY)), atlas(ws.model(QW))]))
+save("atlas", "Head roles", "atlas", dict(kind="atlas", models=[gemma_atlas, atlas(m), atlas(ws.model(PY)), atlas(ws.model(QW))]))
 ws.models.pop(QW, None)
 
 # ---- corpus sweep + benchmark against the published IOI circuit

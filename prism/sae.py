@@ -26,7 +26,12 @@ REGISTRY = {
     "EleutherAI/pythia-70m-deduped": dict(repo="ctigges/pythia-70m-deduped__res-sm_processed", path="{n}-res-sm",
                                           neuronpedia_model="pythia-70m-deduped", neuronpedia_source="{n}-res-sm",
                                           layers=[1, 2, 3, 4, 5], offset=-1),
+    # Gemma Scope 2 (JumpReLU, trained on the output of layer n = resid_pre[n + 1]); 16k-wide residual SAEs.
+    "unsloth/gemma-3-1b-pt": dict(repo="google/gemma-scope-2-1b-pt", path="resid_post/layer_{n}_width_16k_l0_medium",
+                                  file="params.safetensors", format="gemmascope", neuronpedia_model="gemma-3-1b",
+                                  neuronpedia_source="{n}-gemmascope-2-res-16k", layers=[8, 14, 18, 23], offset=-1),
 }
+REGISTRY["google/gemma-3-1b-pt"] = REGISTRY["unsloth/gemma-3-1b-pt"]
 
 
 @dataclass
@@ -44,8 +49,23 @@ class SAE:
         """Map a raw residual into the space the SAE was trained on."""
         return x - x.mean(-1, keepdim=True) if self.center else x
 
+    threshold: Optional[torch.Tensor] = None   # [F] JumpReLU thresholds (Gemma Scope); None = plain ReLU
+    pre_bias: bool = True    # subtract b_dec before encoding (false for Gemma Scope)
+
+    def _gate(self, pre: torch.Tensor, index=None) -> torch.Tensor:
+        a = torch.relu(pre)
+        if self.threshold is None:
+            return a
+        return a * (pre > (self.threshold if index is None else self.threshold[index]))
+
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.relu((self.prep(x) - self.b_dec) @ self.W_enc + self.b_enc)
+        x = self.prep(x) - (self.b_dec if self.pre_bias else 0)
+        return self._gate(x @ self.W_enc + self.b_enc)
+
+    def act_one(self, x: torch.Tensor, index: int) -> torch.Tensor:
+        """Activation of a single feature: [...,d] -> [...]"""
+        x = self.prep(x) - (self.b_dec if self.pre_bias else 0)
+        return self._gate(x @ self.W_enc[:, index] + self.b_enc[index], index)
 
     def decode(self, f: torch.Tensor) -> torch.Tensor:
         return f @ self.W_dec + self.b_dec
@@ -63,9 +83,12 @@ def load_sae(model_name: str, layer: int, device: str = "cpu") -> SAE:
         raise ValueError(f"no SAE for {model_name} layer {layer}; available: {reg['layers']}")
     n = layer + reg.get("offset", 0)
     sub = reg["path"].format(n=n)
-    w = load_file(hf_hub_download(reg["repo"], f"{sub}/sae_weights.safetensors"), device=device)
-    return SAE(w["W_enc"], w["b_enc"], w["W_dec"], w["b_dec"], layer, reg.get("neuronpedia_model"),
-               reg["neuronpedia_source"].format(n=n), reg.get("center", False))
+    w = load_file(hf_hub_download(reg["repo"], f"{sub}/{reg.get('file', 'sae_weights.safetensors')}"), device=device)
+    np_model, np_src = reg.get("neuronpedia_model"), reg["neuronpedia_source"].format(n=n)
+    if reg.get("format") == "gemmascope":
+        w = {k.lower(): v.float() for k, v in w.items()}
+        return SAE(w["w_enc"], w["b_enc"], w["w_dec"], w["b_dec"], layer, np_model, np_src, False, w["threshold"], False)
+    return SAE(w["W_enc"], w["b_enc"], w["W_dec"], w["b_dec"], layer, np_model, np_src, reg.get("center", False))
 
 
 def feature_hook(sae: SAE, index: int, scale: float = 0.0, add: float = 0.0, pos: Optional[int] = None) -> Hook:
@@ -76,7 +99,7 @@ def feature_hook(sae: SAE, index: int, scale: float = 0.0, add: float = 0.0, pos
 
     def fn(t):
         t = t.clone()
-        act = torch.relu((sae.prep(t[:, sl]) - sae.b_dec) @ sae.W_enc[:, index] + sae.b_enc[index])
+        act = sae.act_one(t[:, sl], index)
         t[:, sl] += ((scale - 1) * act + add).unsqueeze(-1) * sae.W_dec[index]
         return t
     return Hook("resid_pre", sae.layer, fn)
@@ -156,7 +179,7 @@ def feature_attribution(m: WhiteBoxModel, task: Task, saes: list, k: int = 12, g
         def ablate(t, cells=cells, s=s):                        # row i of the batch ablates candidate i
             t = t.clone()
             for i, (p, f) in enumerate(cells):
-                act = torch.relu((s.prep(t[i, p]) - s.b_dec) @ s.W_enc[:, f] + s.b_enc[f])
+                act = s.act_one(t[i, p], f)
                 t[i, p] -= act * s.W_dec[f]
             return t
         abl = task.metric(m.forward(task.ids.expand(len(cells), -1), hooks=[Hook("resid_pre", s.layer, ablate)]).logits)

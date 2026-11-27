@@ -97,6 +97,17 @@ Measured: components that keep about 90% of the behaviour fell from 30 to 23 of 
 from 24 to 20 on greater-than, and from 159 to 48 of 360 on Qwen2.5-0.5B (13% of the model). The previous Qwen
 weak spot is largely closed; integrated gradients on Qwen is not.
 
+## Phase 0.99 — Gemma 3 and a public page (done, 2026-11-27)
+
+- **Gemma 3 1B** with Gemma Scope 2 residual SAEs (JumpReLU) at four layers, labelled through Neuronpedia. Checked:
+  the loaded dictionary is the folder Neuronpedia names, and activations on its own top examples match (217.7 vs 217.65).
+- **Post-norm blocks** (Gemma family): block outputs are read after their output norm and each head and neuron is
+  attributed through that run's frozen scale, so the decomposition stays exact.
+- **Public page** at https://sugeerth.github.io/prism/ built with `scripts/build_static.py --site`; every tab passes
+  axe (WCAG 2.1 A/AA and best practice) in light, dark and phone layouts.
+
+This starts Phase 1's first item. Still to do there: larger Gemma and Llama models, transcoders, a remote backend.
+
 ## Phase 1 — Model coverage
 
 | Work | Why | Exit test |

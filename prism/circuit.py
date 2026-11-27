@@ -50,8 +50,8 @@ def edge_attribution(m: WhiteBoxModel, task: Task, corrupt_ids: torch.Tensor, st
     # upstream output differences in residual space: [U,T,d]
     d_up = [clean.resid_pre[0][0] - cor.resid_pre[0][0]]
     for l in range(L):
-        W, dz = m.attn_proj_matrix(l), (clean.z[l] - cor.z[l])[0]
-        d_up += [dz[:, h * dh:(h + 1) * dh] @ W[h * dh:(h + 1) * dh] for h in range(H)]
+        dh_out = (m.head_outputs(clean, l) - m.head_outputs(cor, l))[0]            # [T,H,d]
+        d_up += [dh_out[:, h] for h in range(H)]
     d_up += [(clean.mlp_out[l] - cor.mlp_out[l])[0] for l in range(L)]
     D = torch.stack(d_up)
 

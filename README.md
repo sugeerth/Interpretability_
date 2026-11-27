@@ -61,14 +61,15 @@ for f in bundle["findings"]:
 ```
 
 Any Hugging Face causal LM works for every method except SAE features: `prism sweep "..." --model Qwen/Qwen2.5-0.5B`.
-SAE features need a release registered in `prism/sae.py:REGISTRY`; GPT-2 small and Pythia-70m ship registered, both
-with feature ids that match Neuronpedia.
+SAE features need a release registered in `prism/sae.py:REGISTRY`. Three ship registered, all with feature ids that
+match Neuronpedia: **Gemma 3 1B** (Gemma Scope 2, JumpReLU), GPT-2 small and Pythia-70m. Gemma-style blocks, which
+normalise each sub-layer's output before adding it to the residual stream, are handled exactly.
 
 ## Deploying it for everyone
 
 | Target | What users get | How |
 |---|---|---|
-| Static demo | The full UI on precomputed GPT-2 results, no backend | Merge to `main`, then Settings → Pages → Source: *GitHub Actions* (`.github/workflows/pages.yml`) |
+| Static demo | The full UI on precomputed results (Gemma 3 1B, GPT-2, Qwen, Pythia), no backend. Live at <https://sugeerth.github.io/prism/>; `scripts/build_static.py --site URL --out DIR` builds a page with metadata for any site | Merge to `main`, then Settings → Pages → Source: *GitHub Actions* (`.github/workflows/pages.yml`) |
 | Live app | Any prompt, interventions, agent | `docker build -t prism . && docker run -p 7860:7860 prism` — intended for Hugging Face Spaces (Docker), Fly.io, Cloud Run or Render. The image itself has not been built yet; the same install-then-serve steps pass in a clean virtual environment |
 
 Server settings (environment variables): `PRISM_MODELS` (allowed model ids, default GPT-2 small and Pythia-70m), `PRISM_STORE`
@@ -113,7 +114,7 @@ regenerate with `scripts/build_demo.py`):
 ## Development
 
 ```bash
-pytest -q                          # 35 tests on tiny random GPT-2 and Llama models, including the Claude-planned agent loop against a scripted transport, no network needed
+pytest -q                          # 37 tests on tiny random GPT-2, Llama and Gemma models, including the Claude-planned agent loop against a scripted transport, no network needed
 python scripts/build_demo.py       # regenerate web/bundles/ (downloads models, SAEs and WikiText-2; needs pyarrow)
 python scripts/build_static.py     # dist/ static site
 ```

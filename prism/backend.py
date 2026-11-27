@@ -41,6 +41,8 @@ class Cache:
     resid_final: Optional[torch.Tensor] = None      # [B,T,d] (input of final norm)
     attn_out: list = field(default_factory=list)
     mlp_out: list = field(default_factory=list)
+    attn_scale: list = field(default_factory=list)  # L x [B,T,d] or None: elementwise scale a post-norm applied to the block output
+    mlp_scale: list = field(default_factory=list)
     z: list = field(default_factory=list)
     neurons: list = field(default_factory=list)
     embeds: Optional[torch.Tensor] = None
@@ -87,6 +89,13 @@ class WhiteBoxModel:
         self._mlp = lambda b: _first(b, ["mlp", "feed_forward", "ffn"])
         self._attn_proj = lambda b: _first(self._attn(b), ["c_proj", "o_proj", "out_proj", "dense"])
         self._mlp_proj = lambda b: _first(self._mlp(b), ["c_proj", "down_proj", "fc2", "dense_4h_to_h"])
+        # Gemma-style blocks normalise each sub-layer's output before adding it to the residual stream.
+        # What enters the stream is then the post-norm output, so that is where attn_out / mlp_out are read.
+        # (Llama-style blocks also have an attribute called post_attention_layernorm, but there it is the
+        # MLP's *input* norm; only blocks that also have post_feedforward_layernorm use output norms.)
+        self.post_norm = _first(b0, ["post_feedforward_layernorm"]) is not None
+        self._attn_post = lambda b: _first(b, ["post_attention_layernorm"]) if self.post_norm else None
+        self._mlp_post = lambda b: _first(b, ["post_feedforward_layernorm"]) if self.post_norm else None
         cfg = model.config
         self.n_layers = len(self.blocks)
         self.n_heads = getattr(cfg, "num_attention_heads", None) or getattr(cfg, "n_head")
@@ -175,6 +184,18 @@ class WhiteBoxModel:
                 return (t,) + tuple(res[1:]) if is_tuple else t
             return f
 
+        def post_normed(site, layer, store, scales):
+            def f(mod, args, res):
+                raw = args[0]
+                # RMS-type norms act as an elementwise scale that is constant per position: y = x * (g / rms(x)).
+                # Freezing that scale makes each head's and neuron's contribution to the stream linear again.
+                scales.append(torch.where(raw.abs() > 1e-9, res / raw, torch.zeros_like(res)).detach())
+                t = edit(site, layer, res)
+                if site in want:
+                    keep(store, t)
+                return t
+            return f
+
         def pre_final(mod, args):
             if "resid_final" in want or "resid_pre" in want:
                 out.resid_final = args[0] if grad else args[0].detach()
@@ -187,10 +208,15 @@ class WhiteBoxModel:
                 handles.append(self._attn_proj(b).register_forward_pre_hook(pre_proj("z", l, out.z)))
             if "neurons" in sites_used:
                 handles.append(self._mlp_proj(b).register_forward_pre_hook(pre_proj("neurons", l, out.neurons)))
-            if "attn_out" in sites_used:
-                handles.append(self._attn(b).register_forward_hook(post("attn_out", l, out.attn_out)))
-            if "mlp_out" in sites_used:
-                handles.append(self._mlp(b).register_forward_hook(post("mlp_out", l, out.mlp_out)))
+            for site, mod, pn, store, scales in (("attn_out", self._attn(b), self._attn_post(b), out.attn_out, out.attn_scale),
+                                                 ("mlp_out", self._mlp(b), self._mlp_post(b), out.mlp_out, out.mlp_scale)):
+                if site not in sites_used:
+                    continue
+                if pn is None:
+                    handles.append(mod.register_forward_hook(post(site, l, store)))
+                    scales.append(None)
+                else:
+                    handles.append(pn.register_forward_hook(post_normed(site, l, store, scales)))
         if self.final_norm is not None:
             handles.append(self.final_norm.register_forward_pre_hook(pre_final))
         try:
@@ -249,6 +275,15 @@ class WhiteBoxModel:
             if torch.allclose(x / rms * g, y, rtol=2e-2, atol=2e-2):
                 return g * u / rms, True
         return u * (y.norm() / x.norm()), False
+
+    def head_outputs(self, c: Cache, layer: int) -> torch.Tensor:
+        """Each head's contribution to the residual stream, [B,T,H,d] (needs 'z' and 'attn_out' cached).
+        With a post-norm the frozen scale of that run is applied, so the heads sum to attn_out."""
+        W, dh = self.attn_proj_matrix(layer), self.d_z // self.n_heads
+        z = c.z[layer]
+        out = torch.stack([z[..., h * dh:(h + 1) * dh] @ W[h * dh:(h + 1) * dh] for h in range(self.n_heads)], -2)
+        sc = c.attn_scale[layer] if c.attn_scale else None
+        return out if sc is None else out * sc.unsqueeze(-2)
 
     def attn_proj_matrix(self, layer: int) -> torch.Tensor:
         return _in_out_matrix(self._attn_proj(self.blocks[layer]))    # [H*d_head, d]

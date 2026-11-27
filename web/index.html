@@ -8,7 +8,7 @@
 /* Layout: an instrument panel. One prompt runs left→right through input · internals · output; every panel shares one diverging scale. */
 :root{
   --bg:#f6f7fa; --panel:#ffffff; --ink:#161a26; --muted:#5d6577; --line:#dfe3ec; --cell:#eef0f5;
-  --pos:#0b7fa8; --neg:#d2601a; --accent:#4a3fd0; --accent-ink:#ffffff; --good:#1c8a5a; --warn:#b07a00;
+  --pos:#0a6c90; --neg:#b04a0c; --accent:#4a3fd0; --accent-ink:#ffffff; --good:#15734a; --warn:#855b00;
   --font-display:"Space Grotesk",system-ui,sans-serif; --font-body:"Inter",system-ui,sans-serif;
   --font-mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
 }
@@ -33,6 +33,7 @@ nav{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid var(--line)}
 nav a{padding:8px 12px;color:var(--muted);text-decoration:none;font-weight:500;border-bottom:2px solid transparent;margin-bottom:-1px}
 nav a[aria-current="true"]{color:var(--ink);border-color:var(--accent)}
 nav a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.mainstack{display:flex;flex-direction:column;gap:16px;min-width:0}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px;min-width:0;display:flex;flex-direction:column;gap:10px}
 .phead{display:flex;flex-wrap:wrap;gap:8px 12px;justify-content:space-between;align-items:flex-start}
 .grid{display:grid;gap:16px;grid-template-columns:minmax(0,1fr)}
@@ -40,7 +41,7 @@ nav a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visibl
 form.run{display:grid;gap:10px;grid-template-columns:minmax(0,1fr)}
 @media(min-width:760px){form.run{grid-template-columns:minmax(0,3fr) minmax(0,1fr) minmax(0,1fr) auto;align-items:end}.run .wide{grid-column:1/4}}
 textarea{min-height:110px;resize:vertical;line-height:1.45}
-.feat[role=button]{cursor:pointer}.feat[role=button]:hover{border-color:var(--accent)}
+.linkbtn{background:none;border:0;padding:0;color:var(--accent);font:inherit;text-decoration:underline;cursor:pointer}
 .mapgrid{grid-template-columns:minmax(0,1fr)} @media(min-width:1040px){.mapgrid{grid-template-columns:minmax(0,auto) minmax(260px,1fr);align-items:start}}
 svg .sel{stroke:var(--accent)!important;stroke-width:2.4px!important}
 svg [data-node]:focus{outline:none}
@@ -103,7 +104,8 @@ svg text{font-family:var(--font-mono);fill:var(--ink)} svg .mut{fill:var(--muted
     <a href="#map">Map</a><a href="#trace">Trace</a><a href="#circuit">Circuit</a><a href="#compare">Compare</a><a href="#atlas">Atlas</a><a href="#concepts">Concepts</a><a href="#training">Training diff</a><a href="#blackbox">Black-box</a><a href="#agent">Agent</a>
   </nav>
 
-  <section class="panel" id="runpanel">
+  <main class="mainstack">
+  <section class="panel" id="runpanel" aria-label="Prompt">
     <form class="run" id="runform">
       <label class="wide">Prompt (the model's next token is what gets explained)<input id="f-prompt" required maxlength="2000"></label>
       <button type="submit" id="f-run">Run sweep</button>
@@ -116,7 +118,8 @@ svg text{font-family:var(--font-mono);fill:var(--ink)} svg .mut{fill:var(--muted
     <div class="note" id="runnote"></div>
   </section>
 
-  <main id="view"></main>
+  <div id="view"></div>
+  </main>
 </div>
 
 <script>
@@ -134,11 +137,17 @@ const el = (tag, attrs = {}, ...kids) => {
 const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v)) ? "–" : (v > 0 ? "+" : "") + Number(v).toFixed(d);
 const show = t => t.replace(/\n/g, "⏎").replace(/ /g, "·");
 /* One diverging scale everywhere: positive pushes toward the target, negative against. */
-const tint = (v, max) => {
-  const a = Math.min(1, Math.abs(v) / (max || 1)), pct = Math.round(Math.sqrt(a) * 88);
-  return `color-mix(in oklab, var(${v >= 0 ? "--pos" : "--neg"}) ${pct}%, var(--cell))`;
-};
-const ink = (v, max) => Math.abs(v) / (max || 1) > 0.45 ? "var(--panel)" : "var(--ink)";
+/* Colours are mixed in script (not CSS color-mix) so the text colour on each tinted cell can be chosen by
+   measured contrast: whichever of black or white reads better is always at least 4.5:1. */
+const PAL = {};
+const cssRGB = name => { if (!PAL[name]) { const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim().replace("#", ""); const h = v.length === 3 ? v.replace(/./g, "$&$&") : v; PAL[name] = [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16)); } return PAL[name]; };
+const mixRGB = (name, t) => { const a = cssRGB("--cell"), b = cssRGB(name); return a.map((x, i) => Math.round(x + (b[i] - x) * t)); };
+const lum = c => { const [r, g, b] = c.map(x => { x /= 255; return x <= 0.04045 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4); }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+const onColor = c => lum(c) > 0.179 ? "#000" : "#fff";
+const amount = (v, max) => Math.sqrt(Math.min(1, Math.abs(v) / (max || 1))) * 0.88;
+const tint = (v, max) => `rgb(${mixRGB(v >= 0 ? "--pos" : "--neg", amount(v, max)).join(",")})`;
+const ink = (v, max) => onColor(mixRGB(v >= 0 ? "--pos" : "--neg", amount(v, max)));
+const shade = w => { const c = mixRGB("--accent", Math.max(0, Math.min(1, w)) * 0.9); return `background:rgb(${c.join(",")});color:${onColor(c)}`; };
 const maxAbs = a => Math.max(1e-9, ...a.flat(2).filter(v => v !== null && v !== undefined).map(Math.abs));
 
 const S = { live: false, health: null, index: [], cache: {}, bundle: null, training: null, opts: { input: "integrated_gradients", heat: "logit_lens", heads: "dla" }, agentSteps: [] };
@@ -250,16 +259,16 @@ function attentionPanel(b) {
   const T = b.tokens.length, g = el("div", { class: "heat", style: `grid-template-columns:auto repeat(${T},minmax(22px,1fr))` });
   b.attention.forEach(a => {
     g.append(el("div", { class: "lab" }, `${a.layer}.${a.head} (${fmt(a.dla, 1)})`));
-    a.pattern.forEach((w, t) => g.append(el("div", { class: "cell", style: `background:color-mix(in oklab, var(--accent) ${Math.round(w * 90)}%, var(--cell));color:${w > 0.5 ? "var(--accent-ink)" : "var(--ink)"}`, title: `head ${a.layer}.${a.head} → ${show(b.tokens[t])} (pos ${t}): ${w.toFixed(3)}`, ...posAttrs(t) }, w > 0.3 ? w.toFixed(1).replace(/^0/, "") : "")));
+    a.pattern.forEach((w, t) => g.append(el("div", { class: "cell", style: shade(w), title: `head ${a.layer}.${a.head} → ${show(b.tokens[t])} (pos ${t}): ${w.toFixed(3)}`, ...posAttrs(t) }, w > 0.3 ? w.toFixed(1).replace(/^0/, "") : "")));
   });
   g.append(el("div", {}));
   b.tokens.forEach((t, i) => g.append(el("div", { class: "col", ...posAttrs(i) }, show(t))));
   return panel("Where the top heads look", "Attention from the final position for the six heads with the largest direct effect (their effect in brackets). A head's effect is what it writes; this is where it reads from.", el("div", { class: "scroll" }, g));
 }
 function featCard(f, mx) {
-  return el("div", { class: "feat", role: "button", tabindex: "0", onclick: () => inspect(f), onkeydown: e => { if (e.key === "Enter") inspect(f); }, ...posAttrs(f.pos) },
+  return el("div", { class: "feat", ...posAttrs(f.pos) },
     el("span", { class: "expl" }, f.explanation || el("span", { class: "sub" }, "no Neuronpedia label")),
-    el("span", { class: "meta" }, `#${f.index} at ${show(f.token)} · act ${f.act.toFixed(1)} · `, f.url ? el("a", { href: f.url, target: "_blank", rel: "noopener" }, "Neuronpedia") : ""),
+    el("span", { class: "meta" }, `#${f.index} at ${show(f.token)} · act ${f.act.toFixed(1)} · `, f.url ? el("a", { href: f.url, target: "_blank", rel: "noopener" }, "Neuronpedia") : "", " · ", el("button", { class: "linkbtn", type: "button", onclick: () => inspect(f) }, "Inspect")),
     el("span", { class: "pill", style: `background:${tint(f.effect, mx)};color:${ink(f.effect, mx)};border-color:transparent`, title: `exact ablation effect ${fmt(f.effect, 3)} · integrated gradients ${fmt(f.attribution, 3)} · local gradient ${fmt(f.grad_attribution, 3)}` }, fmt(f.effect)));
 }
 async function inspect(f) {
@@ -287,7 +296,7 @@ function inspectorPanel(b) {
 function featuresPanel(b) {
   if (!b.features) return panel("SAE features", "No sparse autoencoder is registered for this model, so the feature view is unavailable.");
   const mx = maxAbs(b.features.layers.map(L => L.features.map(f => f.effect)));
-  return panel("Sparse-autoencoder features", "Features read from the residual stream and labelled by Neuronpedia. The number is the exact change in the metric when that one feature is ablated at that position. Select a feature to inspect it.",
+  return panel("Sparse-autoencoder features", "Features read from the residual stream and labelled by Neuronpedia. The number is the exact change in the metric when that one feature is ablated at that position. Use Inspect on a feature for details.",
     el("div", { class: "grid", style: `grid-template-columns:repeat(auto-fit,minmax(240px,1fr))` }, b.features.layers.map(L =>
       el("div", { class: "feats" }, el("div", { class: "legend" }, el("b", { class: "mono", style: "color:var(--ink)" }, `Layer ${L.layer}`), `SAE error share ${fmt(L.error_attribution)}`),
         L.features.slice(0, 6).map(f => featCard(f, mx))))),
@@ -424,7 +433,7 @@ function headGrid(H, mx, title, single) {
   const nH = H[0].length, g = el("div", { class: "heat", style: `grid-template-columns:auto repeat(${nH},minmax(18px,1fr))` });
   for (let l = H.length - 1; l >= 0; l--) {
     g.append(el("div", { class: "lab" }, "L" + l));
-    H[l].forEach((v, h) => g.append(el("div", { class: "cell", tabindex: "0", style: `min-width:18px;background:${single ? `color-mix(in oklab, var(--accent) ${Math.round(Math.min(1, v / mx) * 90)}%, var(--cell))` : tint(v, mx)};color:${single ? (v / mx > 0.5 ? "var(--accent-ink)" : "var(--ink)") : ink(v, mx)}`, title: title(l, h, v) }, Math.abs(v) / mx > 0.45 ? `${h}` : "")));
+    H[l].forEach((v, h) => g.append(el("div", { class: "cell", tabindex: "0", style: single ? `min-width:18px;${shade(v / mx)}` : `min-width:18px;background:${tint(v, mx)};color:${ink(v, mx)}`, title: title(l, h, v) }, Math.abs(v) / mx > 0.45 ? `${h}` : "")));
   }
   return el("div", { class: "scroll" }, g);
 }
@@ -777,7 +786,7 @@ function mlpCard(b, l, circ) {
 function resample(ys, n = 24) { return Array.from({ length: n }, (_, i) => { const x = i * (ys.length - 1) / (n - 1), a = Math.floor(x), c = Math.min(ys.length - 1, a + 1); return ys[a] + (ys[c] - ys[a]) * (x - a); }); }
 function viewCompare() {
   const sweeps = S.index.filter(x => x.kind === "sweep"); if (sweeps.length < 2) return panel("Compare", "Needs at least two stored examples.");
-  S.cmp = S.cmp || [sweeps[0].id, (sweeps.find(x => /pythia/.test(x.id)) || sweeps[1]).id, (sweeps.find(x => /qwen/.test(x.id)) || {}).id].filter(Boolean);
+  S.cmp = S.cmp || [(sweeps.find(x => x.id === "gemma-ioi") || sweeps[0]).id, (sweeps.find(x => x.id === "ioi") || sweeps[1]).id, (sweeps.find(x => /qwen/.test(x.id)) || {}).id].filter(Boolean);
   const got = S.cmp.map(id => S.cache[id]); S.cmp.forEach(id => { if (!S.cache[id]) loadBundle(id).then(render).catch(() => {}); });
   const cols = ["var(--accent)", "var(--pos)", "var(--neg)"], pickers = el("div", { style: "display:flex;gap:10px;flex-wrap:wrap" }, S.cmp.map((id, i) => el("label", { style: "flex:1 1 220px" }, el("span", { style: `color:${cols[i]}` }, "● " + ["First", "Second", "Third"][i]), el("select", { id: "cmp-" + i, onchange: e => { S.cmp[i] = e.target.value; render(); } }, sweeps.map(x => el("option", { value: x.id, ...(x.id === id ? { selected: "" } : {}) }, x.title))))));
   const top = panel("Compare runs", "Put two or three runs side by side: the same prompt on different models, or different prompts on one model. Depth is normalised, so a 6-layer and a 24-layer model share an axis.", pickers);
@@ -797,7 +806,7 @@ function viewCompare() {
       panel("Where is the answer written?", "Running total of every component's direct effect, as a share of the final metric. Dips are layers that push against the answer.", lineChart(series(cum), depth, v => (100 * v).toFixed(0) + "%"), legend2.cloneNode(true))),
     el("div", { class: "grid g11" },
       panel("How compact is the circuit?", "Behaviour kept as more of the top-ranked components are allowed to run (x: share of all components, 0–50%). A curve that rises early means a small circuit does the work.", lineChart(series(faith), Array.from({ length: 24 }, (_, i) => i % 4 === 0 ? Math.round(50 * i / 23) + "%" : ""), v => (100 * v).toFixed(0) + "%"), legend2.cloneNode(true)),
-      panel("Side by side", null, el("div", { class: "scroll" }, el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, ""), got.map((b, i) => el("th", { style: `color:${cols[i]}` }, name(b))))),
+      panel("Side by side", null, el("div", { class: "scroll" }, el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, "Measure"), got.map((b, i) => el("th", { style: `color:${cols[i]}` }, name(b))))),
         el("tbody", {}, row("Prompt", b => b.prompt.length > 34 ? b.prompt.slice(0, 32) + "…" : b.prompt), row("Size", b => `${b.model.n_layers}L × ${b.model.n_heads}H · ${(b.model.n_params / 1e6).toFixed(0)}M`), row("Top prediction", b => `${show(b.predictions.top[0].token)} ${(100 * b.predictions.top[0].prob).toFixed(0)}%`), row("Metric", b => fmt(b.predictions.metric)),
           row("Answer on top from", b => { const i = b.logit_lens.target_rank.findIndex(r2 => r2 === 0); return i < 0 ? "never" : `layer ${i} of ${b.model.n_layers}`; }), row("Attention vs MLP", b => `${fmt(b.dla.attn.reduce((a, c) => a + c, 0), 1)} / ${fmt(b.dla.mlp.reduce((a, c) => a + c, 0), 1)}`),
           row("Top direct heads", heads), row("Components for ~90%", ninety), row("Checks confirmed", b => b.verification ? `${b.verification.filter(v => v.predicted * v.measured > 0).length} of ${b.verification.length}` : "–"), row("Token-score error", b => (100 * (b.input_attribution.ig_relative_error || 0)).toFixed(0) + "%")))))));
@@ -819,6 +828,7 @@ function render() {
   else if (!b) node = panel("Loading", S.error || "Fetching the example…");
   else node = { map: viewMap, trace: viewTrace, circuit: viewCircuit, blackbox: viewBlackbox, agent: viewAgent }[r](b);
   v.replaceChildren(node);
+  v.querySelectorAll(".scroll, .step pre").forEach(n => { n.tabIndex = 0; if (!n.getAttribute("aria-label")) { n.setAttribute("role", "group"); n.setAttribute("aria-label", "Scrollable content"); } });
   if (keep && document.getElementById(keep)) document.getElementById(keep).focus();
 }
 async function pick(id) { S.agent = null; S.bbResult = null; S.inspect = null; S.mapSel = null; S.bundle = await loadBundle(id); fillForm(S.bundle); render(); }
@@ -833,14 +843,15 @@ async function runSweep(ev) {
 }
 async function boot() {
   window.addEventListener("hashchange", render);
+  if (window.matchMedia) window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { for (const k in PAL) delete PAL[k]; render(); });
   $("#runform").addEventListener("submit", runSweep);
   try { S.index = (window.PRISM_DATA && window.PRISM_DATA.index) || await getJSON("bundles/index.json"); } catch (e) { S.error = "Could not load the example index: " + e.message; }
   const sweeps = S.index.filter(x => x.kind === "sweep"), sel = $("#f-example");
   sweeps.forEach(x => sel.append(el("option", { value: x.id }, x.title)));
   sel.addEventListener("change", () => pick(sel.value));
-  try { S.health = await getJSON("api/health"); S.live = true; } catch (e) { S.live = false; }
+  if (!window.PRISM_STATIC) { try { S.health = await getJSON("api/health"); S.live = true; } catch (e) { S.live = false; } }
   $("#dot").classList.toggle("live", S.live);
-  $("#mode").textContent = S.live ? `live · ${S.health.models.join(", ")} on ${S.health.device}${S.health.llm_agent ? " · Claude agent on" : ""}` : "static demo · precomputed on GPT-2 small";
+  $("#mode").textContent = S.live ? `live · ${S.health.models.join(", ")} on ${S.health.device}${S.health.llm_agent ? " · Claude agent on" : ""}` : "static demo · precomputed on Gemma 3 1B, GPT-2, Qwen and Pythia";
   $("#f-run").disabled = !S.live;
   $("#runnote").textContent = S.live ? "Type any prompt and run it, or pick an example." : "Pick an example to explore real, precomputed results. Running your own prompts needs the server (see the README: one docker command).";
   if (S.live) S.health.models.forEach(mn => { if (![...$("#f-model").options].some(o => o.value === mn)) $("#f-model").append(el("option", { value: mn }, mn)); });

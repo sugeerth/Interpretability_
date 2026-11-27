@@ -141,8 +141,11 @@ def direct_logit_attribution(m: WhiteBoxModel, task: Task, top_neurons: int = 25
     mlp = torch.stack([x[0, -1] @ d for x in c.mlp_out])
     embed = c.resid_pre[0][0, -1] @ d
     H = m.n_heads
-    heads = torch.stack([(c.z[l][0, -1] * (m.attn_proj_matrix(l) @ d)).view(H, -1).sum(-1) for l in range(m.n_layers)])
-    neuron = torch.stack([c.neurons[l][0, -1] * (m.mlp_proj_matrix(l) @ d) for l in range(m.n_layers)])   # [L,d_mlp]
+    # with a post-norm on the block output, read each head / neuron through that run's frozen scale
+    da = lambda l: d if c.attn_scale[l] is None else d * c.attn_scale[l][0, -1]
+    dm = lambda l: d if c.mlp_scale[l] is None else d * c.mlp_scale[l][0, -1]
+    heads = torch.stack([(c.z[l][0, -1] * (m.attn_proj_matrix(l) @ da(l))).view(H, -1).sum(-1) for l in range(m.n_layers)])
+    neuron = torch.stack([c.neurons[l][0, -1] * (m.mlp_proj_matrix(l) @ dm(l)) for l in range(m.n_layers)])   # [L,d_mlp]
     top = neuron.abs().flatten().topk(top_neurons).indices
     return dict(
         embed=r(float(embed)), attn=r(attn), mlp=r(mlp), heads=r(heads, 3),

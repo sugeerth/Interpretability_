@@ -1,5 +1,20 @@
 [
  {
+  "id": "gemma-capital",
+  "title": "Gemma 3 1B \u00b7 Eiffel Tower \u2192 Paris",
+  "kind": "sweep"
+ },
+ {
+  "id": "gemma-ioi",
+  "title": "Gemma 3 1B \u00b7 indirect object: who gets the drink?",
+  "kind": "sweep"
+ },
+ {
+  "id": "gemma-antonym",
+  "title": "Gemma 3 1B \u00b7 opposites: hot \u2192 cold",
+  "kind": "sweep"
+ },
+ {
   "id": "ioi",
   "title": "Indirect object: who gets the drink?",
   "kind": "sweep"
